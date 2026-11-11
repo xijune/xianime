@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bookmark,
+  CalendarClock,
   Check,
   ChevronLeft,
   ChevronRight,
-  Film,
+  Clock,
+  Home,
   Info,
+  LayoutGrid,
   Loader2,
   Play,
   RotateCcw,
@@ -14,8 +17,11 @@ import {
 } from 'lucide-react';
 import {
   FALLBACK_ANIME_CATALOG,
+  formatAiringDateFr,
   formatRemainingMinutes,
   formatTimecode,
+  getAllSeriesEpisodes,
+  getSeriesSeasons,
   type AnimeSeries,
   type AudioTrack,
   type Episode,
@@ -90,12 +96,10 @@ export default function App() {
     return jsDays[new Date().getDay()] ?? 'Samedi';
   });
 
-  // Live AniList Catalog State
-  const [featuredSeries, setFeaturedSeries] = useState<AnimeSeries[]>(
-    FALLBACK_ANIME_CATALOG.slice(0, 3)
-  );
-  const [trendingSeries, setTrendingSeries] = useState<AnimeSeries[]>(FALLBACK_ANIME_CATALOG);
-  const [catalogSeries, setCatalogSeries] = useState<AnimeSeries[]>(FALLBACK_ANIME_CATALOG);
+  // Live AniList Catalog State (empty until live fetch completes; fallback only on offline/error)
+  const [featuredSeries, setFeaturedSeries] = useState<AnimeSeries[]>([]);
+  const [trendingSeries, setTrendingSeries] = useState<AnimeSeries[]>([]);
+  const [catalogSeries, setCatalogSeries] = useState<AnimeSeries[]>([]);
   const [simulcastSchedule, setSimulcastSchedule] = useState<SimulcastScheduleItem[]>([]);
   const [loadingHome, setLoadingHome] = useState(true);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
@@ -107,7 +111,6 @@ export default function App() {
     anime: AnimeSeries;
     episode: Episode;
     startAt: number;
-    mode?: 'video' | 'trailer' | 'canvas';
   } | null>(null);
 
   // Initial real anime fetch from AniList
@@ -129,6 +132,9 @@ export default function App() {
       })
       .catch(() => {
         if (cancelled) return;
+        setFeaturedSeries(FALLBACK_ANIME_CATALOG.slice(0, 3));
+        setTrendingSeries(FALLBACK_ANIME_CATALOG);
+        setCatalogSeries(FALLBACK_ANIME_CATALOG);
         setApiNotice('Mode hors-ligne actif (catalogue de secours affiché).');
         setLoadingHome(false);
       });
@@ -167,7 +173,10 @@ export default function App() {
     };
   }, [selectedGenre, catalogSort, trendingSeries.length]);
 
-  const activeHero = featuredSeries[heroIndex % featuredSeries.length] ?? featuredSeries[0];
+  const activeHero: AnimeSeries | undefined =
+    featuredSeries.length > 0
+      ? featuredSeries[heroIndex % featuredSeries.length] ?? featuredSeries[0]
+      : undefined;
 
   // Keyboard shortcut Cmd/Ctrl + K for Search
   useEffect(() => {
@@ -184,23 +193,28 @@ export default function App() {
   const openPlayer = useCallback(
     (
       anime: AnimeSeries,
-      episode: Episode,
-      startAt = 0,
-      mode?: 'video' | 'trailer' | 'canvas'
+      episode?: Episode,
+      startAt = 0
     ) => {
+      if (!episode || episode.isUpcoming) return;
       setDetailAnime(null);
-      setPlayerState({ anime, episode, startAt, mode });
+      setPlayerState({ anime, episode, startAt });
     },
     []
   );
 
   const getPrimaryActionForAnime = useCallback(
-    (anime: AnimeSeries) => {
+    (
+      anime: AnimeSeries
+    ): { episode: Episode | undefined; startAt: number; isResuming: boolean } => {
       const latest = getLatestProgressForAnime(anime.id);
+      const allEps = getAllSeriesEpisodes(anime);
       if (latest && !latest.completed && latest.currentTime > 3) {
         const ep =
-          anime.episodes.find((e) => e.id === latest.episodeId) ??
-          latest.snapshot?.episode;
+          allEps.find((e) => e.id === latest.episodeId) ??
+          (latest.snapshot?.episode && !latest.snapshot.episode.isUpcoming
+            ? latest.snapshot.episode
+            : undefined);
         if (ep) {
           return {
             episode: ep,
@@ -210,7 +224,7 @@ export default function App() {
         }
       }
       return {
-        episode: anime.episodes[0],
+        episode: allEps[0],
         startAt: 0,
         isResuming: false,
       };
@@ -231,27 +245,27 @@ export default function App() {
     );
   }, [catalogSeries, selectedAudio]);
 
-  const heroAction = getPrimaryActionForAnime(activeHero);
-  const heroInWatchlist = watchlistIds.includes(activeHero.id);
+  const heroAction = activeHero ? getPrimaryActionForAnime(activeHero) : null;
+  const heroInWatchlist = activeHero ? watchlistIds.includes(activeHero.id) : false;
 
   return (
     <div className="min-h-screen bg-[#0B0C10] text-[#F3F4F6] flex flex-col">
-      {/* Top Bar Contract: 3 zones separated by gap-8 */}
-      <header className="sticky top-0 z-30 bg-[#0B0C10]/92 backdrop-blur-md border-b border-white/8">
-        <div className="max-w-[1400px] mx-auto px-4 sm:px-8 h-16 flex items-center justify-between gap-8">
+      {/* Top Bar Contract: 3 zones on desktop; compact wordmark + search on iPhone */}
+      <header className="md:sticky md:top-0 z-30 bg-[#0B0C10]/92 backdrop-blur-md border-b border-white/8 pt-[env(safe-area-inset-top)]">
+        <div className="max-w-[1400px] mx-auto px-4 sm:px-8 h-14 md:h-16 flex items-center justify-between gap-4 md:gap-8">
           {/* Zone 1: Single-element Brand Wordmark */}
           <button
             type="button"
             onClick={() => setActiveNav('accueil')}
-            className="text-xl font-display font-bold tracking-tight text-white whitespace-nowrap shrink-0 cursor-pointer"
+            className="text-xl font-display font-bold tracking-tight text-white whitespace-nowrap shrink-0 cursor-pointer min-h-[44px] flex items-center"
           >
             KuroStream
           </button>
 
-          {/* Zone 2: 4 single-line navigation links */}
+          {/* Zone 2: 4 single-line navigation links (desktop; mobile uses bottom tab bar) */}
           <nav
             aria-label="Navigation principale"
-            className="flex items-center gap-5 sm:gap-7 overflow-x-auto"
+            className="hidden md:flex items-center gap-7"
           >
             {(
               [
@@ -285,7 +299,8 @@ export default function App() {
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#181B24] hover:bg-[#222633] border border-white/10 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              aria-label="Rechercher un animé"
+              className="inline-flex items-center justify-center gap-2 px-3 sm:px-4 min-h-[44px] min-w-[44px] rounded-lg bg-[#181B24] hover:bg-[#222633] border border-white/10 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Search className="w-4 h-4 text-zinc-300" />
               <span className="hidden sm:inline">Rechercher</span>
@@ -305,84 +320,99 @@ export default function App() {
           <>
             {/* Hero Spotlight */}
             <section className="relative w-full border-b border-white/8 overflow-hidden">
-              <div className="relative max-w-[1400px] mx-auto aspect-[16/10] sm:aspect-[16/7] min-h-[380px] max-h-[560px]">
+              {!activeHero || !heroAction ? (
+                <div className="relative max-w-[1400px] mx-auto min-h-[420px] sm:min-h-[440px] sm:aspect-[16/7] sm:max-h-[560px] bg-[#111319] flex items-end sm:items-center px-4 sm:px-10 py-8">
+                  <div className="max-w-xl w-full space-y-4 animate-pulse">
+                    <div className="h-3.5 w-48 rounded bg-white/10" />
+                    <div className="h-10 w-3/4 rounded-lg bg-white/12" />
+                    <div className="h-4 w-full rounded bg-white/8" />
+                    <div className="h-4 w-5/6 rounded bg-white/8" />
+                    <div className="flex gap-3 pt-2">
+                      <div className="h-11 w-44 rounded-lg bg-[#FF5E1A]/40" />
+                      <div className="h-11 w-28 rounded-lg bg-white/10" />
+                    </div>
+                  </div>
+                </div>
+              ) : (
+              <div className="relative max-w-[1400px] mx-auto min-h-[420px] sm:min-h-[440px] sm:aspect-[16/7] sm:max-h-[560px] flex flex-col justify-end sm:block">
                 <ArtworkImage
                   src={activeHero.keyVisual || activeHero.posterImage}
                   alt={activeHero.title}
                   title={activeHero.title}
                   accentTint={activeHero.accentTint}
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
                 />
-                <div className="absolute inset-0 bg-gradient-to-r from-[#0B0C10] via-[#0B0C10]/82 to-transparent" />
-                <div className="absolute inset-0 bg-gradient-to-t from-[#0B0C10] via-transparent to-[#0B0C10]/35" />
+                <div className="absolute inset-0 bg-gradient-to-r from-[#0B0C10] via-[#0B0C10]/85 to-[#0B0C10]/30 sm:to-transparent" />
+                <div className="absolute inset-0 bg-gradient-to-t from-[#0B0C10] via-[#0B0C10]/45 to-[#0B0C10]/35" />
 
-                <div className="absolute inset-0 flex items-end sm:items-center px-5 sm:px-10 pb-8 sm:pb-0">
-                  <div className="max-w-xl">
-                    <p className="text-xs sm:text-sm text-zinc-300 mb-2.5">
+                <div className="relative sm:absolute sm:inset-0 flex items-end sm:items-center px-4 sm:px-10 pt-16 pb-6 sm:py-0">
+                  <div className="max-w-xl w-full">
+                    <p className="text-xs sm:text-sm text-zinc-300 mb-2 line-clamp-1">
                       {activeHero.genres.join(' · ')} · {activeHero.year} ·{' '}
-                      {activeHero.studio} · {activeHero.episodesCount} ép. ·{' '}
-                      {activeHero.score}/10
+                      {activeHero.studio} ·{' '}
+                      {activeHero.episodesCount === 0 || activeHero.status === 'À venir'
+                        ? `À venir${activeHero.nextAiringAt ? ` (${formatAiringDateFr(activeHero.nextAiringAt)})` : ''}`
+                        : `${activeHero.episodesCount} ép.`}{' '}
+                      · {activeHero.score}/10
                     </p>
 
                     <h1
-                      className="font-display font-bold text-white tracking-tight leading-[1.08] mb-3.5"
+                      className="font-display font-bold text-white tracking-tight leading-[1.08] mb-3"
                       style={{
-                        fontSize: 'clamp(2rem, 4vw, 3.3rem)',
+                        fontSize: 'clamp(1.75rem, 4vw, 3.3rem)',
                         textWrap: 'balance',
                       }}
                     >
                       {activeHero.title}
                     </h1>
 
-                    <p className="text-sm sm:text-base text-zinc-300 leading-relaxed line-clamp-3 mb-6">
+                    <p className="text-sm sm:text-base text-zinc-300 leading-relaxed line-clamp-2 sm:line-clamp-3 mb-5 sm:mb-6">
                       {activeHero.synopsis}
                     </p>
 
-                    <div className="flex flex-wrap items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openPlayer(
-                            activeHero,
-                            heroAction.episode,
-                            heroAction.startAt
-                          )
-                        }
-                        className="inline-flex items-center gap-2 px-5 py-3 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                      >
-                        <Play className="w-4 h-4 fill-current" />
-                        <span>
-                          {heroAction.isResuming
-                            ? `Reprendre E${heroAction.episode.number} · ${formatTimecode(heroAction.startAt)}`
-                            : `Regarder Épisode ${heroAction.episode.number}`}
-                        </span>
-                      </button>
-
-                      {activeHero.trailerYoutubeId ? (
+                    <div className="flex flex-wrap items-center gap-2.5 sm:gap-3">
+                      {heroAction.episode ? (
                         <button
                           type="button"
                           onClick={() =>
                             openPlayer(
                               activeHero,
                               heroAction.episode,
-                              0,
-                              'trailer'
+                              heroAction.startAt
                             )
                           }
-                          className="inline-flex items-center gap-2 px-4 py-3 rounded-lg bg-white/12 hover:bg-white/20 text-white text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                          className="inline-flex items-center justify-center gap-2 px-4 sm:px-5 min-h-[44px] rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer flex-1 sm:flex-initial"
                         >
-                          <Film className="w-4 h-4" />
-                          <span>Bande-annonce</span>
+                          <Play className="w-4 h-4 fill-current" />
+                          <span>
+                            {heroAction.isResuming
+                              ? `Reprendre S${heroAction.episode.season} E${heroAction.episode.number} · ${formatTimecode(heroAction.startAt)}`
+                              : `Regarder Épisode ${heroAction.episode.number}`}
+                          </span>
                         </button>
-                      ) : null}
+                      ) : (
+                        <button
+                          type="button"
+                          disabled
+                          className="inline-flex items-center justify-center gap-2 px-4 sm:px-5 min-h-[44px] rounded-lg bg-white/8 border border-white/15 text-zinc-300 text-sm font-medium whitespace-nowrap shrink-0 cursor-not-allowed flex-1 sm:flex-initial"
+                        >
+                          <Clock className="w-4 h-4 text-amber-400" />
+                          <span>
+                            À venir
+                            {activeHero.nextAiringAt
+                              ? ` · ${formatAiringDateFr(activeHero.nextAiringAt)}`
+                              : ''}
+                          </span>
+                        </button>
+                      )}
 
                       <button
                         type="button"
                         onClick={() => setDetailAnime(activeHero)}
-                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg bg-white/10 hover:bg-white/16 text-white text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center justify-center gap-2 px-4 min-h-[44px] rounded-lg bg-white/10 hover:bg-white/16 text-white text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         <Info className="w-4 h-4" />
-                        <span>Épisodes</span>
+                        <span>{heroAction.episode ? 'Épisodes' : 'Détails'}</span>
                       </button>
 
                       <button
@@ -393,17 +423,17 @@ export default function App() {
                             ? 'Retirer de ma liste'
                             : 'Ajouter à ma liste'
                         }
-                        className="inline-flex items-center gap-2 px-4 py-3 rounded-lg bg-black/45 hover:bg-white/12 border border-white/15 text-zinc-200 text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                        className="inline-flex items-center justify-center gap-2 px-3.5 sm:px-4 min-h-[44px] rounded-lg bg-black/45 hover:bg-white/12 border border-white/15 text-zinc-200 text-sm font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                       >
                         {heroInWatchlist ? (
                           <>
                             <Check className="w-4 h-4 text-[#FF5E1A]" />
-                            <span>Dans ma liste</span>
+                            <span className="hidden sm:inline">Dans ma liste</span>
                           </>
                         ) : (
                           <>
                             <Bookmark className="w-4 h-4" />
-                            <span>Ma liste</span>
+                            <span className="hidden sm:inline">Ma liste</span>
                           </>
                         )}
                       </button>
@@ -411,9 +441,9 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Clean Hero Slide Switcher */}
-                <div className="absolute right-5 bottom-6 flex items-center gap-2">
-                  <span className="text-xs font-mono tabular-nums text-zinc-400 mr-1">
+                {/* Clean Hero Slide Switcher (top-right on mobile so it never overlaps CTAs) */}
+                <div className="absolute top-3.5 right-4 sm:top-auto sm:right-5 sm:bottom-6 flex items-center gap-1.5 sm:gap-2">
+                  <span className="text-xs font-mono tabular-nums text-zinc-300 mr-1">
                     0{(heroIndex % featuredSeries.length) + 1} / 0
                     {featuredSeries.length}
                   </span>
@@ -427,7 +457,7 @@ export default function App() {
                           featuredSeries.length
                       )
                     }
-                    className="p-2 rounded-lg bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors cursor-pointer"
+                    className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors cursor-pointer"
                   >
                     <ChevronLeft className="w-4 h-4" />
                   </button>
@@ -437,12 +467,13 @@ export default function App() {
                     onClick={() =>
                       setHeroIndex((prev) => (prev + 1) % featuredSeries.length)
                     }
-                    className="p-2 rounded-lg bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors cursor-pointer"
+                    className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-black/60 hover:bg-black/85 border border-white/15 text-white transition-colors cursor-pointer"
                   >
                     <ChevronRight className="w-4 h-4" />
                   </button>
                 </div>
               </div>
+              )}
             </section>
 
             {/* Section 1: Reprendre le visionnage */}
@@ -470,7 +501,7 @@ export default function App() {
                     Aucun épisode en cours de lecture pour le moment.
                   </p>
                   <p className="text-xs text-zinc-500">
-                    Lancez un animé ci-dessous, chargez un fichier vidéo ou testez l’aperçu puis mettez en pause pour sauvegarder votre position.
+                    Lancez un épisode puis mettez en pause pour sauvegarder votre position à la seconde près.
                   </p>
                 </div>
               ) : (
@@ -523,9 +554,9 @@ export default function App() {
                             onClick={() => removeEpisodeProgress(entry.episodeId)}
                             title="Retirer de la reprise"
                             aria-label="Retirer cet épisode de la liste de reprise"
-                            className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-black/70 hover:bg-black text-zinc-300 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+                            className="absolute top-2.5 right-2.5 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-black/70 hover:bg-black text-zinc-200 hover:text-white opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity cursor-pointer"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
 
                           <div className="absolute inset-x-0 bottom-0 h-1.5 bg-white/20">
@@ -595,7 +626,7 @@ export default function App() {
                       Animés populaires du moment
                     </h2>
                     <p className="text-sm text-zinc-400 mt-1">
-                      Catalogue officiel en direct · Bandes-annonces HD et lecture vidéo locale.
+                      Catalogue officiel en direct · Lecture vidéo directe par URL.
                     </p>
                   </div>
                   {loadingHome || loadingCatalog ? (
@@ -603,13 +634,13 @@ export default function App() {
                   ) : null}
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto">
+                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto no-scrollbar max-w-full">
                   {GENRES.map((genre) => (
                     <button
                       key={genre}
                       type="button"
                       onClick={() => setSelectedGenre(genre)}
-                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      className={`px-3.5 min-h-[38px] rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         selectedGenre === genre
                           ? 'bg-[#FF5E1A] text-white'
                           : 'text-zinc-400 hover:text-white'
@@ -622,9 +653,26 @@ export default function App() {
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                {displayedHomeSeries.slice(0, 9).map((anime) => {
+                {loadingHome && displayedHomeSeries.length === 0
+                  ? Array.from({ length: 6 }).map((_, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-xl bg-[#13151B] border border-white/8 overflow-hidden animate-pulse"
+                      >
+                        <div className="aspect-video bg-white/6" />
+                        <div className="p-5 space-y-3">
+                          <div className="h-3 w-32 rounded bg-white/8" />
+                          <div className="h-5 w-3/4 rounded bg-white/10" />
+                          <div className="h-3.5 w-full rounded bg-white/6" />
+                        </div>
+                      </div>
+                    ))
+                  : displayedHomeSeries.slice(0, 9).map((anime) => {
                   const action = getPrimaryActionForAnime(anime);
                   const inList = watchlistIds.includes(anime.id);
+                  const availableSeasons = getSeriesSeasons(anime).filter(
+                    (s) => s.episodes.length > 0 && s.status !== 'À venir'
+                  );
 
                   return (
                     <article
@@ -645,7 +693,13 @@ export default function App() {
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                         <span className="absolute bottom-3 left-3 text-xs font-mono tabular-nums text-zinc-200">
-                          {anime.score} / 10 · {anime.episodesCount} ép. · {anime.year}
+                          {anime.score} / 10 ·{' '}
+                          {anime.episodesCount === 0 || anime.status === 'À venir'
+                            ? 'À venir'
+                            : availableSeasons.length > 1
+                              ? `${availableSeasons.length} saisons · ${anime.episodesCount} ép.`
+                              : `${anime.episodesCount} ép.`}{' '}
+                          · {anime.year}
                         </span>
                       </button>
 
@@ -669,26 +723,37 @@ export default function App() {
                         </div>
 
                         <div className="flex items-center justify-between gap-2 pt-3 border-t border-white/8">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              openPlayer(anime, action.episode, action.startAt)
-                            }
-                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-white/8 hover:bg-[#FF5E1A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                            <span>
-                              {action.isResuming
-                                ? `Reprendre E${action.episode.number} · ${formatTimecode(action.startAt)}`
-                                : `Regarder E${action.episode.number}`}
-                            </span>
-                          </button>
+                          {action.episode ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openPlayer(anime, action.episode, action.startAt)
+                              }
+                              className="inline-flex items-center justify-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] active:bg-[#FF5E1A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span>
+                                {action.isResuming
+                                  ? `Reprendre S${action.episode.season} E${action.episode.number} · ${formatTimecode(action.startAt)}`
+                                  : `Regarder S${action.episode.season} E${action.episode.number}`}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled
+                              className="inline-flex items-center justify-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap cursor-not-allowed"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-amber-400" />
+                              <span>À venir</span>
+                            </button>
+                          )}
 
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1">
                             <button
                               type="button"
                               onClick={() => setDetailAnime(anime)}
-                              className="px-3 py-2 rounded-lg text-xs font-medium text-zinc-300 hover:text-white hover:bg-white/8 transition-colors whitespace-nowrap cursor-pointer"
+                              className="px-3 min-h-[44px] sm:min-h-[38px] rounded-lg text-xs font-medium text-zinc-300 hover:text-white hover:bg-white/8 transition-colors whitespace-nowrap cursor-pointer"
                             >
                               Détails
                             </button>
@@ -698,7 +763,7 @@ export default function App() {
                               aria-label={
                                 inList ? 'Retirer de ma liste' : 'Ajouter à ma liste'
                               }
-                              className="p-2 rounded-lg text-zinc-300 hover:text-white hover:bg-white/8 transition-colors cursor-pointer"
+                              className="min-h-[44px] min-w-[44px] sm:min-h-[38px] sm:min-w-[38px] flex items-center justify-center rounded-lg text-zinc-300 hover:text-white hover:bg-white/8 transition-colors cursor-pointer"
                             >
                               {inList ? (
                                 <Check className="w-4 h-4 text-[#FF5E1A]" />
@@ -727,13 +792,13 @@ export default function App() {
                   </p>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto">
+                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto no-scrollbar max-w-full">
                   {DAYS.map((day) => (
                     <button
                       key={day}
                       type="button"
                       onClick={() => setSelectedSimulcastDay(day)}
-                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      className={`px-3.5 min-h-[38px] rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                         selectedSimulcastDay === day
                           ? 'bg-[#FF5E1A] text-white'
                           : 'text-zinc-400 hover:text-white'
@@ -756,6 +821,7 @@ export default function App() {
                     .filter((s) => s.day === selectedSimulcastDay)
                     .map((item) => {
                       const action = getPrimaryActionForAnime(item.anime);
+                      const isSlotUpcoming = item.airingAt * 1000 > Date.now();
                       return (
                         <div
                           key={item.id}
@@ -779,34 +845,55 @@ export default function App() {
                                 {item.anime.title}
                               </h3>
                               <p className="text-xs text-zinc-400 truncate mt-0.5">
-                                Épisode {item.episodeNumber} · {item.anime.genres.join(' · ')}
+                                Épisode {item.episodeNumber} ·{' '}
+                                <span
+                                  className={
+                                    isSlotUpcoming ? 'text-amber-300' : 'text-emerald-400'
+                                  }
+                                >
+                                  {isSlotUpcoming ? 'À venir' : 'Disponible'}
+                                </span>{' '}
+                                · {item.anime.genres.join(' · ')}
                               </p>
                             </div>
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                openPlayer(
-                                  item.anime,
-                                  action.episode,
-                                  action.startAt
-                                )
-                              }
-                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-white/8 hover:bg-[#FF5E1A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                            >
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                              <span>
-                                {action.isResuming
-                                  ? `Reprendre (${formatTimecode(action.startAt)})`
-                                  : 'Regarder'}
-                              </span>
-                            </button>
+                            {action.episode ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  openPlayer(
+                                    item.anime,
+                                    action.episode,
+                                    action.startAt
+                                  )
+                                }
+                                className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] active:bg-[#FF5E1A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer flex-1 sm:flex-initial"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                                <span>
+                                  {action.isResuming
+                                    ? `Reprendre (${formatTimecode(action.startAt)})`
+                                    : isSlotUpcoming
+                                      ? `Voir E${action.episode.number}`
+                                      : 'Regarder'}
+                                </span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled
+                                className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap cursor-not-allowed flex-1 sm:flex-initial"
+                              >
+                                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                                <span>À venir</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => setDetailAnime(item.anime)}
-                              className="px-3 py-2 rounded-lg text-xs text-zinc-300 hover:text-white hover:bg-white/8 transition-colors whitespace-nowrap cursor-pointer"
+                              className="px-3 min-h-[44px] sm:min-h-[38px] rounded-lg text-xs text-zinc-300 hover:text-white hover:bg-white/8 transition-colors whitespace-nowrap cursor-pointer"
                             >
                               Épisodes
                             </button>
@@ -889,13 +976,13 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto mb-8 w-fit max-w-full">
+            <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg overflow-x-auto no-scrollbar mb-8 w-fit max-w-full">
               {GENRES.map((genre) => (
                 <button
                   key={genre}
                   type="button"
                   onClick={() => setSelectedGenre(genre)}
-                  className={`px-3.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`px-3.5 min-h-[38px] rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     selectedGenre === genre
                       ? 'bg-[#FF5E1A] text-white'
                       : 'text-zinc-400 hover:text-white'
@@ -910,6 +997,9 @@ export default function App() {
               {displayedCatalogue.map((anime) => {
                 const action = getPrimaryActionForAnime(anime);
                 const inList = watchlistIds.includes(anime.id);
+                const availableSeasons = getSeriesSeasons(anime).filter(
+                  (s) => s.episodes.length > 0 && s.status !== 'À venir'
+                );
 
                 return (
                   <article
@@ -930,7 +1020,11 @@ export default function App() {
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                       <span className="absolute bottom-3 left-3 text-xs font-mono tabular-nums text-zinc-200">
-                        {anime.score} / 10 · {anime.year} · {anime.status}
+                        {anime.score} / 10 ·{' '}
+                        {availableSeasons.length > 1
+                          ? `${availableSeasons.length} saisons · `
+                          : ''}
+                        {anime.year} · {anime.status}
                       </span>
                     </button>
 
@@ -939,29 +1033,46 @@ export default function App() {
                         <p className="text-xs text-zinc-400 mb-1 truncate">
                           {anime.genres.join(' · ')} · {anime.studio}
                         </p>
-                        <h3 className="text-lg font-display font-semibold text-white line-clamp-1">
-                          {anime.title}
-                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setDetailAnime(anime)}
+                          className="text-left cursor-pointer"
+                        >
+                          <h3 className="text-lg font-display font-semibold text-white hover:text-[#FF5E1A] transition-colors line-clamp-1">
+                            {anime.title}
+                          </h3>
+                        </button>
                         <p className="text-sm text-zinc-400 line-clamp-2 mt-1.5">
                           {anime.synopsis}
                         </p>
                       </div>
 
                       <div className="flex items-center justify-between gap-2 pt-3 border-t border-white/8">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            openPlayer(anime, action.episode, action.startAt)
-                          }
-                          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>
-                            {action.isResuming
-                              ? `Reprendre · ${formatTimecode(action.startAt)}`
-                              : `Regarder E${action.episode.number}`}
-                          </span>
-                        </button>
+                        {action.episode ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openPlayer(anime, action.episode, action.startAt)
+                            }
+                            className="inline-flex items-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>
+                              {action.isResuming
+                                ? `Reprendre · ${formatTimecode(action.startAt)}`
+                                : `Regarder S${action.episode.season} E${action.episode.number}`}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled
+                            className="inline-flex items-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap cursor-not-allowed"
+                          >
+                            <Clock className="w-3.5 h-3.5 text-amber-400" />
+                            <span>À venir</span>
+                          </button>
+                        )}
 
                         <div className="flex items-center gap-1.5">
                           <button
@@ -1030,6 +1141,7 @@ export default function App() {
                       <div className="space-y-4">
                         {list.map((item) => {
                           const action = getPrimaryActionForAnime(item.anime);
+                          const isSlotUpcoming = item.airingAt * 1000 > Date.now();
                           return (
                             <div
                               key={item.id}
@@ -1048,24 +1160,47 @@ export default function App() {
                                     {item.anime.title}
                                   </button>
                                   <p className="text-xs text-zinc-400 truncate">
-                                    Épisode {item.episodeNumber} · {item.anime.genres.join(' · ')}
+                                    Épisode {item.episodeNumber} ·{' '}
+                                    <span
+                                      className={
+                                        isSlotUpcoming ? 'text-amber-300' : 'text-emerald-400'
+                                      }
+                                    >
+                                      {isSlotUpcoming ? 'À venir' : 'Disponible'}
+                                    </span>{' '}
+                                    · {item.anime.genres.join(' · ')}
                                   </p>
                                 </div>
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  openPlayer(
-                                    item.anime,
-                                    action.episode,
-                                    action.startAt
-                                  )
-                                }
-                                className="px-3 py-1.5 rounded-lg bg-white/8 hover:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-                              >
-                                {action.isResuming ? 'Reprendre' : 'Regarder'}
-                              </button>
+                              {action.episode ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    openPlayer(
+                                      item.anime,
+                                      action.episode,
+                                      action.startAt
+                                    )
+                                  }
+                                  className="px-3 min-h-[38px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                                >
+                                  {action.isResuming
+                                    ? 'Reprendre'
+                                    : isSlotUpcoming
+                                      ? `Voir E${action.episode.number}`
+                                      : 'Regarder'}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled
+                                  className="inline-flex items-center gap-1 px-3 min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap shrink-0 cursor-not-allowed"
+                                >
+                                  <Clock className="w-3 h-3 text-amber-400" />
+                                  <span>À venir</span>
+                                </button>
+                              )}
                             </div>
                           );
                         })}
@@ -1133,7 +1268,10 @@ export default function App() {
                       <div className="p-5 flex-1 flex flex-col justify-between gap-4">
                         <div>
                           <p className="text-xs text-zinc-400 mb-1">
-                            {anime.genres.join(' · ')} · {anime.episodesCount} ép.
+                            {anime.genres.join(' · ')} ·{' '}
+                            {anime.episodesCount === 0 || anime.status === 'À venir'
+                              ? 'À venir'
+                              : `${anime.episodesCount} ép.`}
                           </p>
                           <h3 className="text-lg font-display font-semibold text-white">
                             {anime.title}
@@ -1141,20 +1279,31 @@ export default function App() {
                         </div>
 
                         <div className="flex items-center justify-between gap-2 pt-3 border-t border-white/8">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              openPlayer(anime, action.episode, action.startAt)
-                            }
-                            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5 fill-current" />
-                            <span>
-                              {action.isResuming
-                                ? `Reprendre · ${formatTimecode(action.startAt)}`
-                                : 'Regarder'}
-                            </span>
-                          </button>
+                          {action.episode ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                openPlayer(anime, action.episode, action.startAt)
+                              }
+                              className="inline-flex items-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span>
+                                {action.isResuming
+                                  ? `Reprendre · ${formatTimecode(action.startAt)}`
+                                  : 'Regarder'}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled
+                              className="inline-flex items-center gap-1.5 px-3.5 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap cursor-not-allowed"
+                            >
+                              <Clock className="w-3.5 h-3.5 text-amber-400" />
+                              <span>À venir</span>
+                            </button>
+                          )}
 
                           <button
                             type="button"
@@ -1174,8 +1323,8 @@ export default function App() {
         ) : null}
       </main>
 
-      {/* Quiet Editorial Footer */}
-      <footer className="border-t border-white/8 bg-[#0B0C10]">
+      {/* Quiet Editorial Footer (extra bottom padding for mobile tab bar + safe area) */}
+      <footer className="border-t border-white/8 bg-[#0B0C10] pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-0">
         <div className="max-w-[1400px] mx-auto px-4 sm:px-8 py-8 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
           <div>
             <span className="text-base font-display font-bold text-white">
@@ -1189,34 +1338,72 @@ export default function App() {
             <button
               type="button"
               onClick={() => setActiveNav('accueil')}
-              className="hover:text-white transition-colors cursor-pointer"
+              className="hover:text-white transition-colors cursor-pointer min-h-[36px]"
             >
               Accueil
             </button>
             <button
               type="button"
               onClick={() => setActiveNav('catalogue')}
-              className="hover:text-white transition-colors cursor-pointer"
+              className="hover:text-white transition-colors cursor-pointer min-h-[36px]"
             >
               Catalogue
             </button>
             <button
               type="button"
               onClick={() => setActiveNav('simulcast')}
-              className="hover:text-white transition-colors cursor-pointer"
+              className="hover:text-white transition-colors cursor-pointer min-h-[36px]"
             >
               Simulcast
             </button>
             <button
               type="button"
               onClick={() => setActiveNav('maliste')}
-              className="hover:text-white transition-colors cursor-pointer"
+              className="hover:text-white transition-colors cursor-pointer min-h-[36px]"
             >
               Ma Liste
             </button>
           </div>
         </div>
       </footer>
+
+      {/* iPhone Fixed Bottom Tab Bar (Thumb-Zone Navigation) */}
+      <nav
+        aria-label="Navigation mobile"
+        className="fixed bottom-0 inset-x-0 z-40 md:hidden bg-[#0B0C10]/94 backdrop-blur-md border-t border-white/10 pb-[env(safe-area-inset-bottom)]"
+      >
+        <div className="grid grid-cols-4 h-14">
+          {(
+            [
+              { id: 'accueil', label: 'Accueil', icon: Home },
+              { id: 'catalogue', label: 'Catalogue', icon: LayoutGrid },
+              { id: 'simulcast', label: 'Simulcast', icon: CalendarClock },
+              { id: 'maliste', label: 'Ma Liste', icon: Bookmark },
+            ] as const
+          ).map((tab) => {
+            const Icon = tab.icon;
+            const active = activeNav === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  setActiveNav(tab.id);
+                  window.scrollTo({ top: 0, behavior: 'smooth' });
+                }}
+                className={`flex flex-col items-center justify-center gap-0.5 min-h-[44px] transition-colors cursor-pointer ${
+                  active ? 'text-[#FF5E1A]' : 'text-zinc-400 active:text-white'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="text-[11px] font-medium tracking-tight leading-none">
+                  {tab.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
 
       {/* Live Search Modal */}
       {searchOpen ? (
@@ -1240,13 +1427,12 @@ export default function App() {
         />
       ) : null}
 
-      {/* Hybrid HD Video Player Modal */}
+      {/* HD Video Player Modal */}
       {playerState ? (
         <VideoPlayerModal
           anime={playerState.anime}
           episode={playerState.episode}
           initialTime={playerState.startAt}
-          initialMode={playerState.mode}
           preferences={preferences}
           progressByEpisode={progressByEpisode}
           onUpdatePreferences={updatePreferences}

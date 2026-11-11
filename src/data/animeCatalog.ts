@@ -46,11 +46,31 @@ export interface Episode {
   endingStart: number;
   thumbnail: string;
   videoUrl?: string;
+  isUpcoming?: boolean;
+  airingAt?: number;
   cues: SubtitleCue[];
+}
+
+export interface AnimeSeason {
+  id: string;
+  seasonNumber: number;
+  anilistId?: number;
+  malId?: number;
+  slug?: string;
+  title: string;
+  year?: number;
+  status?: 'En cours' | 'Terminé' | 'À venir';
+  episodesCount: number;
+  nextAiringEpisode?: number;
+  nextAiringAt?: number;
+  posterImage?: string;
+  keyVisual?: string;
+  episodes: Episode[];
 }
 
 export interface AnimeSeries {
   id: string;
+  slug?: string;
   anilistId?: number;
   malId?: number;
   title: string;
@@ -63,6 +83,8 @@ export interface AnimeSeries {
   status: 'En cours' | 'Terminé' | 'À venir';
   simulcastDay: SimulcastDay;
   simulcastTime: string;
+  nextAiringEpisode?: number;
+  nextAiringAt?: number;
   audioTracks: AudioTrack[];
   episodesCount: number;
   synopsis: string;
@@ -73,6 +95,50 @@ export interface AnimeSeries {
   particleTheme: ParticleTheme;
   featured?: boolean;
   episodes: Episode[];
+  seasons?: AnimeSeason[];
+}
+
+export function getSeriesSeasons(anime: AnimeSeries): AnimeSeason[] {
+  if (anime.seasons && anime.seasons.length > 0) {
+    return anime.seasons;
+  }
+  return [
+    {
+      id: `${anime.id}-season-1`,
+      seasonNumber: 1,
+      anilistId: anime.anilistId,
+      malId: anime.malId,
+      slug: anime.slug,
+      title: 'Saison 1',
+      year: anime.year,
+      status: anime.status,
+      episodesCount: anime.episodes.filter((e) => !e.isUpcoming).length,
+      nextAiringEpisode: anime.nextAiringEpisode,
+      nextAiringAt: anime.nextAiringAt,
+      posterImage: anime.posterImage,
+      keyVisual: anime.keyVisual,
+      episodes: anime.episodes.filter((e) => !e.isUpcoming),
+    },
+  ];
+}
+
+export function getAllSeriesEpisodes(anime: AnimeSeries): Episode[] {
+  if (anime.seasons && anime.seasons.length > 0) {
+    return anime.seasons.flatMap((s) => s.episodes.filter((e) => !e.isUpcoming));
+  }
+  return anime.episodes.filter((e) => !e.isUpcoming);
+}
+
+export function formatAiringDateFr(unixSeconds?: number): string {
+  if (!unixSeconds) return 'Date à confirmer';
+  const date = new Date(unixSeconds * 1000);
+  return date.toLocaleDateString('fr-FR', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 export interface SimulcastScheduleItem {
@@ -151,12 +217,14 @@ export function buildEpisodeCues(
 export function buildEpisodesForAnime(
   animeId: string,
   animeTitle: string,
-  totalEpisodes: number,
+  releasedEpisodesCount: number,
   durationMinutes: number,
   fallbackThumb: string,
-  streamingEpisodes?: Array<{ title?: string | null; thumbnail?: string | null }>
+  streamingEpisodes?: Array<{ title?: string | null; thumbnail?: string | null }>,
+  seasonNumber = 1
 ): Episode[] {
-  const count = Math.max(1, Math.min(totalEpisodes || 12, 48));
+  if (releasedEpisodesCount <= 0) return [];
+  const count = Math.min(releasedEpisodesCount, 100);
   const durSec = Math.max(12, durationMinutes || 24) * 60;
   const list: Episode[] = [];
 
@@ -168,17 +236,18 @@ export function buildEpisodesForAnime(
     const thumb = streamInfo?.thumbnail || fallbackThumb;
 
     list.push({
-      id: `${animeId}-s1-e${i}`,
+      id: `${animeId}-s${seasonNumber}-e${i}`,
       animeId,
-      season: 1,
+      season: seasonNumber,
       number: i,
       title: cleanTitle,
-      synopsis: `Épisode ${i} de ${animeTitle}. Cliquez sur Lire pour regarder ou reprendre votre progression à la seconde près.`,
+      synopsis: `Saison ${seasonNumber} · Épisode ${i} de ${animeTitle}. Cliquez pour regarder ou reprendre votre progression à la seconde près.`,
       duration: durSec,
       introStart: 15,
       introEnd: 90,
       endingStart: Math.max(120, durSec - 90),
       thumbnail: thumb,
+      isUpcoming: false,
       cues: buildEpisodeCues(animeTitle, i, cleanTitle, durSec),
     });
   }
@@ -217,7 +286,7 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     simulcastDay: 'Samedi',
     simulcastTime: '18:30',
     audioTracks: ['VOSTFR', 'VF'],
-    episodesCount: 12,
+    episodesCount: 24,
     featured: true,
     accentTint: '#FF5E1A',
     particleTheme: 'rain',
@@ -225,7 +294,31 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: kuroganeImg,
     synopsis:
       'Dans une métropole féodale balayée par des orages perpétuels, Renji Kurogane manie une lame forgée dans l’éclair pour traquer les esprits déchus.',
-    episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg),
+    episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1),
+    seasons: [
+      {
+        id: 'fallback-kurogane-s1',
+        seasonNumber: 1,
+        slug: 'kurogane-lame-d-orage',
+        title: 'Saison 1 · L’Éveil de l’Éclair',
+        year: 2025,
+        episodesCount: 12,
+        keyVisual: kuroganeImg,
+        posterImage: kuroganeImg,
+        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1),
+      },
+      {
+        id: 'fallback-kurogane-s2',
+        seasonNumber: 2,
+        slug: 'kurogane-lame-d-orage-saison-2',
+        title: 'Saison 2 · Tempête Écarlate',
+        year: 2026,
+        episodesCount: 12,
+        keyVisual: kuroganeImg,
+        posterImage: kuroganeImg,
+        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 2),
+      },
+    ],
   },
   {
     id: 'fallback-neo',
@@ -248,7 +341,7 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: neoCourierImg,
     synopsis:
       'Sora transporte des données cryptées interdites à travers les autoroutes suspendues de Néo-Tokyo.',
-    episodes: buildEpisodesForAnime('fallback-neo', 'Néo-Coursier 2099', 10, 24, neoCourierImg),
+    episodes: buildEpisodesForAnime('fallback-neo', 'Néo-Coursier 2099', 10, 24, neoCourierImg, undefined, 1),
   },
   {
     id: 'fallback-aether',
@@ -271,7 +364,31 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: aetherIslandsImg,
     synopsis:
       'Au-delà d’une mer de nuages dorés flottent des archipels oubliés. À bord de leur dirigeable de cuivre, Lyra et Kaito cartographient les cités célestes.',
-    episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 24, 24, aetherIslandsImg),
+    episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1),
+    seasons: [
+      {
+        id: 'fallback-aether-s1',
+        seasonNumber: 1,
+        slug: 'les-iles-d-ether',
+        title: 'Saison 1 · La Mer de Nuages',
+        year: 2024,
+        episodesCount: 12,
+        keyVisual: aetherIslandsImg,
+        posterImage: aetherIslandsImg,
+        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1),
+      },
+      {
+        id: 'fallback-aether-s2',
+        seasonNumber: 2,
+        slug: 'les-iles-d-ether-saison-2',
+        title: 'Saison 2 · Les Cités Célestes',
+        year: 2025,
+        episodesCount: 12,
+        keyVisual: aetherIslandsImg,
+        posterImage: aetherIslandsImg,
+        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 2),
+      },
+    ],
   },
   {
     id: 'fallback-bibliotheca',

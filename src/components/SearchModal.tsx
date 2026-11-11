@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Loader2, Play, Search, X } from 'lucide-react';
-import type { AnimeSeries } from '../data/animeCatalog';
+import { Clock, Loader2, Play, Search, X } from 'lucide-react';
+import { getSeriesSeasons, type AnimeSeries } from '../data/animeCatalog';
 import { searchRealAnime } from '../services/anilistApi';
 import { ArtworkImage } from './ArtworkImage';
 
@@ -73,13 +73,13 @@ export function SearchModal({
 
   return (
     <div
-      className="fixed inset-0 z-40 bg-black/80 backdrop-blur-sm flex items-start justify-center pt-16 sm:pt-24 px-4"
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-start justify-center pt-[max(1rem,env(safe-area-inset-top))] pb-[env(safe-area-inset-bottom)] px-3 sm:px-4 sm:pt-20"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-2xl bg-[#111319] border border-white/12 rounded-2xl overflow-hidden shadow-2xl">
-        <div className="flex items-center gap-3 px-4 py-3.5 border-b border-white/10">
+      <div className="w-full max-w-2xl max-h-[85dvh] bg-[#111319] border border-white/12 rounded-2xl overflow-hidden shadow-2xl flex flex-col">
+        <div className="flex items-center gap-2.5 px-3.5 sm:px-4 py-2.5 sm:py-3 border-b border-white/10 shrink-0">
           {loading ? (
             <Loader2 className="w-5 h-5 text-[#FF5E1A] animate-spin shrink-0" />
           ) : (
@@ -87,65 +87,86 @@ export function SearchModal({
           )}
           <input
             ref={inputRef}
-            type="text"
+            type="search"
+            enterKeyHint="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Rechercher un vrai animé (One Piece, Frieren, Solo Leveling, Naruto…)"
-            className="w-full bg-transparent text-sm sm:text-base text-white placeholder:text-zinc-500 focus:outline-none"
+            placeholder="Rechercher un animé (One Piece, Frieren…)"
+            className="w-full bg-transparent text-base text-white placeholder:text-zinc-500 focus:outline-none min-h-[40px]"
           />
           <button
             type="button"
             onClick={onClose}
             aria-label="Fermer la recherche"
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 cursor-pointer"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
         {error ? (
-          <div className="px-4 py-2 text-xs text-amber-400 border-b border-white/8">
+          <div className="px-4 py-2 text-xs text-amber-400 border-b border-white/8 shrink-0">
             {error}
           </div>
         ) : null}
 
-        <div className="max-h-[60vh] overflow-y-auto divide-y divide-white/8">
+        <div className="flex-1 overflow-y-auto overscroll-contain divide-y divide-white/8">
           {!loading && results.length === 0 ? (
-            <div className="py-12 text-center text-sm text-zinc-400">
+            <div className="py-12 px-4 text-center text-sm text-zinc-400">
               Aucun animé trouvé pour « {query} ».
             </div>
           ) : (
-            results.map((anime) => (
-              <button
-                key={anime.id}
-                type="button"
-                onClick={() => {
-                  onSelectAnime(anime);
-                  onClose();
-                }}
-                className="w-full flex items-center gap-4 p-4 text-left hover:bg-white/6 transition-colors cursor-pointer group"
-              >
-                <div className="w-28 aspect-video rounded-lg overflow-hidden bg-black shrink-0">
-                  <ArtworkImage
-                    src={anime.keyVisual || anime.posterImage}
-                    alt={anime.title}
-                    title={anime.title}
-                    accentTint={anime.accentTint}
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h4 className="text-sm font-semibold text-white group-hover:text-[#FF5E1A] transition-colors truncate">
-                    {anime.title}
-                  </h4>
-                  <p className="text-xs text-zinc-400 mt-0.5 truncate">
-                    {anime.genres.join(' · ')} · {anime.studio} · {anime.episodesCount} ép. ·{' '}
-                    {anime.score}/10
-                  </p>
-                </div>
-                <Play className="w-4 h-4 text-zinc-500 group-hover:text-white shrink-0" />
-              </button>
-            ))
+            results.map((anime) => {
+              const availableSeasons = getSeriesSeasons(anime).filter(
+                (s) => s.episodes.length > 0 && s.status !== 'À venir'
+              );
+              const isUpcoming =
+                anime.episodesCount === 0 || anime.status === 'À venir';
+
+              return (
+                <button
+                  key={anime.id}
+                  type="button"
+                  onClick={() => {
+                    onSelectAnime(anime);
+                    onClose();
+                  }}
+                  className="w-full flex items-center gap-3.5 sm:gap-4 p-3.5 sm:p-4 text-left hover:bg-white/6 active:bg-white/10 transition-colors cursor-pointer group min-h-[68px]"
+                >
+                  <div className="w-24 sm:w-28 aspect-video rounded-lg overflow-hidden bg-black shrink-0">
+                    <ArtworkImage
+                      src={anime.keyVisual || anime.posterImage}
+                      alt={anime.title}
+                      title={anime.title}
+                      accentTint={anime.accentTint}
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <h4 className="text-sm font-semibold text-white group-hover:text-[#FF5E1A] transition-colors truncate">
+                      {anime.title}
+                    </h4>
+                    <p className="text-xs text-zinc-400 mt-0.5 truncate">
+                      {anime.genres.join(' · ')} · {anime.studio} ·{' '}
+                      {isUpcoming
+                        ? `À venir (${anime.year})`
+                        : availableSeasons.length > 1
+                          ? `${availableSeasons.length} saisons · ${anime.episodesCount} ép.`
+                          : `${anime.episodesCount} ép.`}{' '}
+                      · {anime.score}/10
+                    </p>
+                  </div>
+                  {isUpcoming ? (
+                    <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-300 shrink-0">
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>À venir</span>
+                    </span>
+                  ) : (
+                    <Play className="w-4 h-4 text-zinc-500 group-hover:text-white shrink-0" />
+                  )}
+                </button>
+              );
+            })
           )}
         </div>
       </div>

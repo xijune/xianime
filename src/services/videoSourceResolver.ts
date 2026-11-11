@@ -1,7 +1,12 @@
 import type { AnimeSeries, Episode } from '../data/animeCatalog';
 
-// L'URL de votre backend (à remplacer par votre IP ou domaine une fois déployé)
-const BACKEND_API_URL = 'http://localhost:3000/api/extract-m3u8';
+// URL optionnelle d'une API vidéo configurée via .env (VITE_VIDEO_API_URL)
+const VIDEO_API_URL = (import.meta.env.VITE_VIDEO_API_URL as string | undefined)?.trim() || '';
+
+function isBlockedMixedContent(url: string): boolean {
+  if (typeof window === 'undefined') return false;
+  return window.location.protocol === 'https:' && /^http:\/\//i.test(url);
+}
 
 export async function resolveEpisodeVideoUrl(
   anime: AnimeSeries,
@@ -9,31 +14,37 @@ export async function resolveEpisodeVideoUrl(
 ): Promise<string | null> {
   if (episode.videoUrl) return episode.videoUrl;
 
-  try {
-    // ⚠️ IMPORTANT : Adaptez cette URL selon comment vous construisez 
-    // les liens de VoirAnime. Ici, je simule avec un slug et un numéro d'épisode.
-    // Ex: https://voir-anime.to/anime/beast-king-war-god-dandivine/dandivine-04-vostfr/
-    const targetUrl = `https://voir-anime.to/anime/${anime.slug}/${anime.slug}-${String(episode.number).padStart(2, '0')}-vostfr/`;
+  if (!VIDEO_API_URL || isBlockedMixedContent(VIDEO_API_URL)) {
+    return null;
+  }
 
-    const response = await fetch(BACKEND_API_URL, {
+  try {
+    const response = await fetch(VIDEO_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: targetUrl }),
+      body: JSON.stringify({
+        animeId: anime.id,
+        slug: anime.slug,
+        episodeNumber: episode.number,
+        season: episode.season,
+      }),
     });
 
     if (!response.ok) {
-      throw new Error('Erreur lors de la communication avec le backend');
+      return null;
     }
 
-    const data = await response.json();
-    
-    if (data.success && data.m3u8Url) {
-      return data.m3u8Url; // On retourne le lien trouvé par Puppeteer
-    }
-    
+    const data = (await response.json()) as {
+      success?: boolean;
+      videoUrl?: string;
+      m3u8Url?: string;
+    };
+
+    if (data.videoUrl) return data.videoUrl;
+    if (data.success && data.m3u8Url) return data.m3u8Url;
+
     return null;
-  } catch (error) {
-    console.error("Erreur resolveEpisodeVideoUrl:", error);
+  } catch {
     return null;
   }
 }

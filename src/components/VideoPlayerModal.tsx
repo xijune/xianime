@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   ChevronRight,
+  Clock,
   FastForward,
-  Film,
-  Link2,
+  Loader2,
   Maximize,
   Minimize,
   Pause,
@@ -13,25 +13,23 @@ import {
   Settings,
   SkipForward,
   Square,
-  Subtitles,
-  Upload,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
+import Hls from 'hls.js';
 import {
+  formatAiringDateFr,
   formatTimecode,
+  getAllSeriesEpisodes,
+  getSeriesSeasons,
   type AnimeSeries,
   type AudioTrack,
   type Episode,
-  type ParticleTheme,
   type VideoQuality,
 } from '../data/animeCatalog';
-import Hls from 'hls.js';
 import type { EpisodeProgress, PlayerPreferences } from '../hooks/useWatchProgress';
 import { resolveEpisodeVideoUrl } from '../services/videoSourceResolver';
-
-type PlayerMode = 'video' | 'trailer' | 'canvas';
 
 function isHlsUrl(url: string): boolean {
   return /\.m3u8(\?.*)?$/i.test(url) || url.toLowerCase().includes('.m3u8');
@@ -41,7 +39,6 @@ interface VideoPlayerModalProps {
   anime: AnimeSeries;
   episode: Episode;
   initialTime: number;
-  initialMode?: PlayerMode;
   preferences: PlayerPreferences;
   progressByEpisode: Record<string, EpisodeProgress>;
   onUpdatePreferences: (patch: Partial<PlayerPreferences>) => void;
@@ -49,61 +46,17 @@ interface VideoPlayerModalProps {
     anime: AnimeSeries,
     episode: Episode,
     currentTime: number,
-    duration: number,
-    videoMeta?: { customVideoUrl?: string; customVideoName?: string }
+    duration: number
   ) => void;
   onMarkCompleted: (anime: AnimeSeries, episode: Episode, duration: number) => void;
   onSelectEpisode: (episode: Episode, startAt?: number) => void;
   onClose: () => void;
 }
 
-interface Particle {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  size: number;
-  alpha: number;
-  phase: number;
-}
-
-function createParticles(theme: ParticleTheme, count: number): Particle[] {
-  const list: Particle[] = [];
-  for (let i = 0; i < count; i++) {
-    list.push({
-      x: Math.random(),
-      y: Math.random(),
-      vx:
-        theme === 'rain'
-          ? -0.0025
-          : theme === 'cyber'
-            ? 0.005 + Math.random() * 0.008
-            : theme === 'petals'
-              ? 0.001 + Math.random() * 0.0015
-              : (Math.random() - 0.5) * 0.0008,
-      vy:
-        theme === 'rain'
-          ? 0.018 + Math.random() * 0.015
-          : theme === 'embers'
-            ? -(0.002 + Math.random() * 0.004)
-            : theme === 'lanterns'
-              ? -(0.0005 + Math.random() * 0.0009)
-              : theme === 'petals'
-                ? 0.0015 + Math.random() * 0.002
-                : 0.0002,
-      size: Math.random() * 3 + 1.2,
-      alpha: Math.random() * 0.6 + 0.25,
-      phase: Math.random() * Math.PI * 2,
-    });
-  }
-  return list;
-}
-
 export function VideoPlayerModal({
   anime,
   episode,
   initialTime,
-  initialMode,
   preferences,
   progressByEpisode,
   onUpdatePreferences,
@@ -112,34 +65,14 @@ export function VideoPlayerModal({
   onSelectEpisode,
   onClose,
 }: VideoPlayerModalProps) {
-  const savedEpEntry = progressByEpisode[episode.id];
-  const initialExternalUrl =
-    savedEpEntry?.customVideoUrl ?? episode.videoUrl ?? '';
-
-  const [mode, setMode] = useState<PlayerMode>(() => {
-    if (initialMode) return initialMode;
-    if (initialExternalUrl) return 'video';
-    if (anime.trailerYoutubeId) return 'trailer';
-    return 'canvas';
-  });
-
-  const [videoSrc, setVideoSrc] = useState<string>(initialExternalUrl);
-  const [videoFileName, setVideoFileName] = useState<string>(
-    savedEpEntry?.customVideoName ?? ''
-  );
-  const [urlInputOpen, setUrlInputOpen] = useState(false);
-  const [urlDraft, setUrlDraft] = useState(initialExternalUrl);
+  const [videoSrc, setVideoSrc] = useState<string>(episode.videoUrl ?? '');
+  const [isLoadingSource, setIsLoadingSource] = useState<boolean>(!episode.videoUrl);
   const [videoError, setVideoError] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const imageRef = useRef<HTMLImageElement | null>(null);
-  const particlesRef = useRef<Particle[]>(createParticles(anime.particleTheme, 90));
   const savedNoticeTimerRef = useRef<number | null>(null);
-  const blobUrlRef = useRef<string | null>(null);
 
   const [isPlaying, setIsPlaying] = useState(true);
   const [duration, setDuration] = useState(episode.duration);
@@ -158,23 +91,38 @@ export function VideoPlayerModal({
   const durationRef = useRef(duration);
   const isPlayingRef = useRef(isPlaying);
   const lastEpisodeIdRef = useRef<string>(episode.id);
-  const progressMapRef = useRef(progressByEpisode);
-  progressMapRef.current = progressByEpisode;
+
+  const seasons = useMemo(() => getSeriesSeasons(anime), [anime]);
+  const [drawerSeasonNum, setDrawerSeasonNum] = useState<number>(episode.season || 1);
+
+  useEffect(() => {
+    setDrawerSeasonNum(episode.season || 1);
+  }, [episode.season]);
+
+  const activeDrawerSeason = useMemo(
+    () => seasons.find((s) => s.seasonNumber === drawerSeasonNum),
+    [drawerSeasonNum, seasons]
+  );
+
+  const drawerEpisodes = useMemo(() => {
+    const raw = activeDrawerSeason?.episodes ?? anime.episodes;
+    return raw.filter((e) => !e.isUpcoming);
+  }, [activeDrawerSeason?.episodes, anime.episodes]);
 
   const nextEpisode = useMemo(() => {
-    const idx = anime.episodes.findIndex((e) => e.id === episode.id);
-    if (idx >= 0 && idx < anime.episodes.length - 1) {
-      return anime.episodes[idx + 1];
+    const allEps = getAllSeriesEpisodes(anime);
+    const idx = allEps.findIndex((e) => e.id === episode.id);
+    if (idx >= 0 && idx < allEps.length - 1) {
+      return allEps[idx + 1];
     }
     return null;
-  }, [anime.episodes, episode.id]);
+  }, [anime, episode.id]);
 
   // Reset state ONLY when switching to a different episode
   useEffect(() => {
     if (lastEpisodeIdRef.current === episode.id) return;
     lastEpisodeIdRef.current = episode.id;
 
-    const entry = progressMapRef.current[episode.id];
     const startPos =
       initialTime > 0 && initialTime < episode.duration - 10 ? initialTime : 0;
     setCurrentTime(startPos);
@@ -185,88 +133,65 @@ export function VideoPlayerModal({
     isPlayingRef.current = true;
     setNextCountdown(null);
     setVideoError(null);
+    setVideoSrc(episode.videoUrl ?? '');
+    setIsLoadingSource(!episode.videoUrl);
+  }, [episode.duration, episode.id, episode.videoUrl, initialTime]);
 
-    const resolvedDirect = entry?.customVideoUrl ?? episode.videoUrl ?? '';
-    if (resolvedDirect) {
-      setVideoSrc(resolvedDirect);
-      setVideoFileName(entry?.customVideoName ?? '');
-      setUrlDraft(resolvedDirect);
-      if (!initialMode) setMode('video');
-    } else if (!blobUrlRef.current) {
-      setVideoSrc('');
-      setVideoFileName(entry?.customVideoName ?? '');
-      setUrlDraft('');
-      if (!initialMode) {
-        setMode(anime.trailerYoutubeId ? 'trailer' : 'canvas');
-      }
-    }
-    particlesRef.current = createParticles(anime.particleTheme, 90);
-  }, [anime.particleTheme, anime.trailerYoutubeId, episode.duration, episode.id, episode.videoUrl, initialMode, initialTime]);
-
-  // Automatic lookup via central videoSourceResolver.ts
+  // Fetch video URL via resolveEpisodeVideoUrl
   useEffect(() => {
-    if (initialMode === 'trailer') return;
-    const entry = progressMapRef.current[episode.id];
-    if (entry?.customVideoUrl || blobUrlRef.current) return;
+    if (episode.videoUrl) {
+      setVideoSrc(episode.videoUrl);
+      setIsLoadingSource(false);
+      return;
+    }
 
     let cancelled = false;
-    void resolveEpisodeVideoUrl(anime, episode).then((url) => {
-      if (cancelled || !url) return;
-      setVideoSrc(url);
-      setUrlDraft(url);
-      setMode('video');
-      setIsPlaying(true);
-      isPlayingRef.current = true;
-    });
+    setIsLoadingSource(true);
+    setVideoError(null);
+
+    void resolveEpisodeVideoUrl(anime, episode)
+      .then((url) => {
+        if (cancelled) return;
+        setIsLoadingSource(false);
+        if (url) {
+          setVideoSrc(url);
+          setIsPlaying(true);
+          isPlayingRef.current = true;
+        } else {
+          setVideoSrc('');
+          setVideoError(
+            "Aucune URL vidéo configurée pour cet épisode. Renseignez episode.videoUrl ou configurez VITE_VIDEO_API_URL."
+          );
+          setIsPlaying(false);
+          isPlayingRef.current = false;
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setIsLoadingSource(false);
+        setVideoSrc('');
+        setVideoError("Impossible de récupérer l'URL vidéo de cet épisode.");
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [anime, episode, initialMode]);
+  }, [anime, episode]);
 
-  // Cleanup any created object URL & timer on unmount
   useEffect(() => {
     return () => {
       if (savedNoticeTimerRef.current) {
         window.clearTimeout(savedNoticeTimerRef.current);
       }
-      if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
-      }
     };
   }, []);
 
-  // Load key visual for canvas cinema mode (no crossOrigin so CDN images never fail CORS)
-  useEffect(() => {
-    let cancelled = false;
-    const primarySrc = episode.thumbnail || anime.keyVisual || anime.posterImage;
-    const fallbackSrc = anime.keyVisual || anime.posterImage;
-
-    const img = new Image();
-    img.referrerPolicy = 'no-referrer';
-    img.onload = () => {
-      if (!cancelled) imageRef.current = img;
-    };
-    img.onerror = () => {
-      if (cancelled || primarySrc === fallbackSrc || !fallbackSrc) return;
-      const fb = new Image();
-      fb.referrerPolicy = 'no-referrer';
-      fb.onload = () => {
-        if (!cancelled) imageRef.current = fb;
-      };
-      fb.src = fallbackSrc;
-    };
-    img.src = primarySrc;
-
-    return () => {
-      cancelled = true;
-    };
-  }, [episode.thumbnail, anime.keyVisual, anime.posterImage]);
-
-  // Attach video source (supports .m3u8 via hls.js or native Safari HLS, plus .mp4/.webm/blob)
+  // Attach video source (.m3u8 via hls.js or native Safari HLS, plus .mp4/.webm)
   useEffect(() => {
     const vid = videoRef.current;
-    if (!vid || mode !== 'video' || !videoSrc) return;
+    if (!vid || !videoSrc) return;
 
     if (hlsRef.current) {
       hlsRef.current.destroy();
@@ -288,15 +213,10 @@ export function VideoPlayerModal({
 
     if (isHlsUrl(videoSrc)) {
       if (Hls.isSupported()) {
-  const hls = new Hls({
-    enableWorker: true,
-    lowLatencyMode: false,
-    // AJOUT CRUCIAL : On fait croire au CDN qu'on est sur VoirAnime
-    xhrSetup: function (xhr, url) {
-      xhr.setRequestHeader('Referer', 'https://voir-anime.to/');
-      xhr.setRequestHeader('Origin', 'https://voir-anime.to');
-    }
-  });
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false,
+        });
         hlsRef.current = hls;
         hls.loadSource(videoSrc);
         hls.attachMedia(vid);
@@ -310,15 +230,13 @@ export function VideoPlayerModal({
           if (data.fatal) {
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               setVideoError(
-                'Erreur réseau ou CORS lors du chargement du flux .m3u8. Vérifiez que le serveur autorise la lecture.'
+                'Erreur réseau ou CORS lors du chargement du flux .m3u8.'
               );
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               hls.recoverMediaError();
               return;
             } else {
-              setVideoError(
-                'Impossible de décoder ce flux .m3u8. Essayez une autre URL vidéo.'
-              );
+              setVideoError('Impossible de décoder ce flux .m3u8.');
             }
             isPlayingRef.current = false;
             setIsPlaying(false);
@@ -343,7 +261,7 @@ export function VideoPlayerModal({
       vid.removeAttribute('src');
       vid.load();
     };
-  }, [mode, videoSrc, onUpdatePreferences]);
+  }, [videoSrc, onUpdatePreferences]);
 
   // Map quality selector to HLS levels when available
   useEffect(() => {
@@ -376,7 +294,7 @@ export function VideoPlayerModal({
   // Sync HTML5 <video> play/pause, volume, playbackRate
   useEffect(() => {
     const vid = videoRef.current;
-    if (!vid || mode !== 'video' || !videoSrc) return;
+    if (!vid || !videoSrc) return;
     vid.volume = preferences.volume;
     vid.muted = preferences.muted;
     vid.playbackRate = preferences.playbackRate;
@@ -387,7 +305,6 @@ export function VideoPlayerModal({
     }
   }, [
     isPlaying,
-    mode,
     videoSrc,
     preferences.volume,
     preferences.muted,
@@ -397,7 +314,7 @@ export function VideoPlayerModal({
   // Save progress periodically while playing AND on unmount
   useEffect(() => {
     const interval = window.setInterval(() => {
-      if (isPlayingRef.current && mode !== 'trailer') {
+      if (isPlayingRef.current && videoSrc) {
         onSaveProgress(
           anime,
           episode,
@@ -409,7 +326,7 @@ export function VideoPlayerModal({
 
     return () => {
       window.clearInterval(interval);
-      if (mode !== 'trailer') {
+      if (videoSrc) {
         onSaveProgress(
           anime,
           episode,
@@ -418,179 +335,11 @@ export function VideoPlayerModal({
         );
       }
     };
-  }, [anime, episode, mode, onSaveProgress]);
-
-  // Canvas HD clock & renderer (active in 'canvas' mode)
-  useEffect(() => {
-    if (mode !== 'canvas') return;
-
-    let rafId = 0;
-    let lastTs = performance.now();
-    let lastUiSync = currentTimeRef.current;
-
-    const resolutionMap: Record<VideoQuality, { w: number; h: number }> = {
-      Auto: { w: 1920, h: 1080 },
-      '1080p': { w: 1920, h: 1080 },
-      '720p': { w: 1280, h: 720 },
-      '480p': { w: 854, h: 480 },
-    };
-
-    const renderFrame = (now: number) => {
-      const dt = Math.min(0.1, (now - lastTs) / 1000);
-      lastTs = now;
-
-      let t = currentTimeRef.current;
-      const dur = durationRef.current;
-      if (isPlayingRef.current) {
-        t = Math.min(dur, t + dt * preferences.playbackRate);
-        currentTimeRef.current = t;
-        if (Math.abs(t - lastUiSync) >= 0.25 || t >= dur) {
-          lastUiSync = t;
-          setCurrentTime(t);
-        }
-
-        if (t >= dur) {
-          isPlayingRef.current = false;
-          setIsPlaying(false);
-          onMarkCompleted(anime, episode, dur);
-        }
-      }
-
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const res = resolutionMap[preferences.quality];
-        if (canvas.width !== res.w || canvas.height !== res.h) {
-          canvas.width = res.w;
-          canvas.height = res.h;
-        }
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          const w = canvas.width;
-          const h = canvas.height;
-
-          ctx.fillStyle = '#07080B';
-          ctx.fillRect(0, 0, w, h);
-
-          const img = imageRef.current;
-          if (img) {
-            const chapter = Math.floor(t / 45);
-            const chapterProgress = (t % 45) / 45;
-            const zoom =
-              chapter % 2 === 0
-                ? 1.04 + chapterProgress * 0.08
-                : 1.12 - chapterProgress * 0.06;
-            const panX = Math.sin(t * 0.09 + chapter) * (w * 0.018);
-            const panY = Math.cos(t * 0.07) * (h * 0.012);
-
-            const drawW = w * zoom;
-            const drawH = h * zoom;
-            const dx = (w - drawW) / 2 + panX;
-            const dy = (h - drawH) / 2 + panY;
-
-            ctx.save();
-            ctx.filter =
-              t >= episode.introStart && t <= episode.introEnd
-                ? 'contrast(1.06) saturate(1.12)'
-                : 'contrast(1.03) saturate(1.04)';
-            ctx.drawImage(img, dx, dy, drawW, drawH);
-            ctx.restore();
-          }
-
-          const vig = ctx.createRadialGradient(
-            w * 0.5,
-            h * 0.5,
-            w * 0.25,
-            w * 0.5,
-            h * 0.5,
-            w * 0.72
-          );
-          vig.addColorStop(0, 'rgba(0,0,0,0)');
-          vig.addColorStop(1, 'rgba(5,6,9,0.52)');
-          ctx.fillStyle = vig;
-          ctx.fillRect(0, 0, w, h);
-
-          const particles = particlesRef.current;
-          const moveScale = isPlayingRef.current
-            ? dt * 60 * preferences.playbackRate
-            : 0;
-          const theme = anime.particleTheme;
-
-          for (let i = 0; i < particles.length; i++) {
-            const p = particles[i];
-            p.x += p.vx * moveScale;
-            p.y += p.vy * moveScale;
-            if (theme === 'petals' || theme === 'lanterns') {
-              p.x += Math.sin(t * 1.4 + p.phase) * 0.0004 * moveScale;
-            }
-            if (p.x > 1.05) p.x = -0.05;
-            if (p.x < -0.05) p.x = 1.05;
-            if (p.y > 1.05) p.y = -0.05;
-            if (p.y < -0.05) p.y = 1.05;
-
-            const px = p.x * w;
-            const py = p.y * h;
-            const scale = w / 1280;
-
-            if (theme === 'rain') {
-              ctx.strokeStyle = `rgba(195, 220, 255, ${p.alpha * 0.48})`;
-              ctx.lineWidth = 1.2 * scale;
-              ctx.beginPath();
-              ctx.moveTo(px, py);
-              ctx.lineTo(px - 6 * scale, py + 28 * scale);
-              ctx.stroke();
-            } else if (theme === 'cyber') {
-              ctx.fillStyle = `rgba(245, 158, 11, ${p.alpha * 0.55})`;
-              ctx.fillRect(px, py, p.size * 9 * scale, 1.5 * scale);
-            } else if (theme === 'embers') {
-              ctx.fillStyle = `rgba(255, 120, 40, ${p.alpha * 0.8})`;
-              ctx.beginPath();
-              ctx.arc(px, py, p.size * 1.1 * scale, 0, Math.PI * 2);
-              ctx.fill();
-            } else if (theme === 'lanterns') {
-              ctx.fillStyle = `rgba(255, 210, 120, ${p.alpha * 0.55})`;
-              ctx.beginPath();
-              ctx.arc(px, py, p.size * 2 * scale, 0, Math.PI * 2);
-              ctx.fill();
-            } else if (theme === 'petals') {
-              ctx.fillStyle = `rgba(255, 196, 175, ${p.alpha * 0.65})`;
-              ctx.beginPath();
-              ctx.ellipse(
-                px,
-                py,
-                p.size * 1.8 * scale,
-                p.size * 0.9 * scale,
-                p.phase + t * 0.8,
-                0,
-                Math.PI * 2
-              );
-              ctx.fill();
-            } else {
-              ctx.fillStyle = `rgba(255, 248, 220, ${p.alpha * 0.4})`;
-              ctx.beginPath();
-              ctx.arc(px, py, p.size * 1.6 * scale, 0, Math.PI * 2);
-              ctx.fill();
-            }
-          }
-        }
-      }
-
-      rafId = window.requestAnimationFrame(renderFrame);
-    };
-
-    rafId = window.requestAnimationFrame(renderFrame);
-    return () => window.cancelAnimationFrame(rafId);
-  }, [
-    anime,
-    episode,
-    mode,
-    onMarkCompleted,
-    preferences.playbackRate,
-    preferences.quality,
-  ]);
+  }, [anime, episode, videoSrc, onSaveProgress]);
 
   // Auto-countdown to next episode near end
   useEffect(() => {
-    if (mode === 'trailer' || !nextEpisode || !preferences.autoplayNext) {
+    if (!videoSrc || !nextEpisode || !preferences.autoplayNext) {
       setNextCountdown(null);
       return;
     }
@@ -606,22 +355,22 @@ export function VideoPlayerModal({
     currentTime,
     duration,
     isPlaying,
-    mode,
     nextEpisode,
     onSelectEpisode,
     preferences.autoplayNext,
+    videoSrc,
   ]);
 
   // Controls auto-hide timer
   useEffect(() => {
-    if (!isPlaying || showSettings || showEpisodesDrawer || mode === 'trailer') {
+    if (!isPlaying || showSettings || showEpisodesDrawer || !videoSrc) {
       setShowControls(true);
       return;
     }
     if (!showControls) return;
     const timer = window.setTimeout(() => setShowControls(false), 3200);
     return () => window.clearTimeout(timer);
-  }, [isPlaying, mode, showControls, showSettings, showEpisodesDrawer]);
+  }, [isPlaying, showControls, showSettings, showEpisodesDrawer, videoSrc]);
 
   const showSavedToast = useCallback((timeSec: number) => {
     setSavedNotice(`Progression sauvegardée à ${formatTimecode(timeSec)}`);
@@ -634,7 +383,7 @@ export function VideoPlayerModal({
   }, []);
 
   const handlePauseAndSave = useCallback(() => {
-    if (mode === 'trailer') return;
+    if (!videoSrc) return;
     const next = !isPlayingRef.current;
     isPlayingRef.current = next;
     setIsPlaying(next);
@@ -643,72 +392,55 @@ export function VideoPlayerModal({
       onSaveProgress(anime, episode, currentTimeRef.current, durationRef.current);
       showSavedToast(currentTimeRef.current);
     }
-  }, [anime, episode, mode, onSaveProgress, showSavedToast]);
+  }, [anime, episode, onSaveProgress, showSavedToast, videoSrc]);
 
   const handleStopAndExit = useCallback(() => {
     isPlayingRef.current = false;
     setIsPlaying(false);
-    if (mode !== 'trailer') {
+    if (videoSrc) {
       onSaveProgress(anime, episode, currentTimeRef.current, durationRef.current);
     }
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
     }
     onClose();
-  }, [anime, episode, mode, onClose, onSaveProgress]);
+  }, [anime, episode, onClose, onSaveProgress, videoSrc]);
 
   const seekTo = useCallback(
     (target: number) => {
       const clamped = Math.max(0, Math.min(target, durationRef.current));
       currentTimeRef.current = clamped;
       setCurrentTime(clamped);
-      if (mode === 'video' && videoRef.current) {
+      if (videoRef.current) {
         videoRef.current.currentTime = clamped;
       }
-      onSaveProgress(anime, episode, clamped, durationRef.current);
+      if (videoSrc) {
+        onSaveProgress(anime, episode, clamped, durationRef.current);
+      }
     },
-    [anime, episode, mode, onSaveProgress]
+    [anime, episode, onSaveProgress, videoSrc]
   );
 
-  const handleLocalFilePicked = (file: File) => {
-    if (blobUrlRef.current) {
-      URL.revokeObjectURL(blobUrlRef.current);
-    }
-    const objUrl = URL.createObjectURL(file);
-    blobUrlRef.current = objUrl;
-    setVideoSrc(objUrl);
-    setVideoFileName(file.name);
-    setVideoError(null);
-    setMode('video');
-    setIsPlaying(true);
-    isPlayingRef.current = true;
-    onSaveProgress(anime, episode, currentTimeRef.current, durationRef.current, {
-      customVideoName: file.name,
-    });
-  };
-
-  const handleApplyDirectUrl = () => {
-    const clean = urlDraft.trim();
-    if (!clean) return;
-    setVideoSrc(clean);
-    setVideoFileName('Flux vidéo externe');
-    setVideoError(null);
-    setUrlInputOpen(false);
-    setMode('video');
-    setIsPlaying(true);
-    isPlayingRef.current = true;
-    onSaveProgress(anime, episode, currentTimeRef.current, durationRef.current, {
-      customVideoUrl: clean,
-      customVideoName: 'Flux vidéo externe',
-    });
-  };
-
   const toggleFullscreen = useCallback(() => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      void containerRef.current.requestFullscreen().catch(() => {});
-    } else {
+    const container = containerRef.current;
+    const vid = videoRef.current as
+      | (HTMLVideoElement & {
+          webkitEnterFullscreen?: () => void;
+          webkitExitFullscreen?: () => void;
+        })
+      | null;
+
+    if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
+      return;
+    }
+
+    if (container && typeof container.requestFullscreen === 'function') {
+      void container.requestFullscreen().catch(() => {
+        vid?.webkitEnterFullscreen?.();
+      });
+    } else if (vid?.webkitEnterFullscreen) {
+      vid.webkitEnterFullscreen();
     }
   }, []);
 
@@ -721,7 +453,6 @@ export function VideoPlayerModal({
   // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
         handlePauseAndSave();
@@ -736,10 +467,9 @@ export function VideoPlayerModal({
       } else if (e.key.toLowerCase() === 'f') {
         toggleFullscreen();
       } else if (e.key === 'Escape') {
-        if (showSettings || showEpisodesDrawer || urlInputOpen) {
+        if (showSettings || showEpisodesDrawer) {
           setShowSettings(false);
           setShowEpisodesDrawer(false);
-          setUrlInputOpen(false);
         } else {
           handleStopAndExit();
         }
@@ -756,20 +486,10 @@ export function VideoPlayerModal({
     showEpisodesDrawer,
     showSettings,
     toggleFullscreen,
-    urlInputOpen,
   ]);
 
-  const activeSubtitle = useMemo(() => {
-    if (preferences.subtitleLang === 'off' || mode === 'trailer') return null;
-    const cue = episode.cues.find(
-      (c) => currentTime >= c.start && currentTime <= c.end
-    );
-    if (!cue) return null;
-    return preferences.subtitleLang === 'jp' ? cue.jp : cue.fr;
-  }, [currentTime, episode.cues, mode, preferences.subtitleLang]);
-
   const inIntro =
-    mode !== 'trailer' &&
+    Boolean(videoSrc) &&
     currentTime >= episode.introStart &&
     currentTime <= episode.introEnd;
   const progressPct =
@@ -779,64 +499,21 @@ export function VideoPlayerModal({
     <div
       ref={containerRef}
       onMouseMove={() => setShowControls(true)}
-      className="fixed inset-0 z-50 bg-black flex flex-col justify-center items-center select-none overflow-hidden"
+      className="fixed inset-0 h-[100dvh] w-full z-50 bg-black flex flex-col justify-center items-center select-none overflow-hidden"
     >
-      {/* Hidden local video file picker */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept="video/*,.mp4,.webm,.mkv,.mov"
-        className="hidden"
-        onChange={(e) => {
-          const file = e.target.files?.[0];
-          if (file) handleLocalFilePicked(file);
-        }}
-      />
-
-      {/* Main Cinema Stage */}
+      {/* Main Video Stage */}
       <div
         className="relative w-full h-full flex items-center justify-center bg-black"
         onClick={(e) => {
           const tag = (e.target as HTMLElement).tagName;
-          if (e.target === e.currentTarget || tag === 'CANVAS' || tag === 'VIDEO') {
+          if (e.target === e.currentTarget || tag === 'VIDEO') {
             setShowSettings(false);
             setShowEpisodesDrawer(false);
             handlePauseAndSave();
           }
         }}
       >
-        {mode === 'trailer' && anime.trailerYoutubeId ? (
-          <div className="w-full h-full pt-16 pb-6 px-2 sm:px-8 flex flex-col items-center justify-center gap-3">
-            <iframe
-              title={`Bande-annonce — ${anime.title}`}
-              src={`https://www.youtube.com/embed/${anime.trailerYoutubeId}?rel=0&playsinline=1`}
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-              allowFullScreen
-              className="w-full max-w-6xl aspect-video rounded-xl border border-white/10 bg-black"
-            />
-            <div className="flex flex-wrap items-center justify-center gap-3 text-xs text-zinc-400 text-center">
-              <span>
-                Bande-annonce officielle (AniList ne fournit pas les épisodes complets sous licence).
-              </span>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="text-white hover:text-[#FF5E1A] underline font-medium cursor-pointer"
-              >
-                Charger un fichier vidéo (.mp4 / .webm)
-              </button>
-              <a
-                href={`https://www.youtube.com/watch?v=${anime.trailerYoutubeId}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[#FF5E1A] hover:underline font-medium"
-              >
-                Ouvrir sur YouTube
-              </a>
-            </div>
-          </div>
-        ) : mode === 'video' && videoSrc ? (
+        {videoSrc ? (
           <video
             ref={videoRef}
             autoPlay
@@ -886,50 +563,34 @@ export function VideoPlayerModal({
               onMarkCompleted(anime, episode, durationRef.current);
             }}
             onError={() => {
-              setVideoError(
-                'Impossible de lire ce flux vidéo. Vérifiez le format (.mp4 / .webm) ou importez un fichier local.'
-              );
+              setVideoError('Impossible de lire ce flux vidéo.');
               isPlayingRef.current = false;
               setIsPlaying(false);
             }}
             className="max-w-full max-h-full w-full h-full object-contain cursor-pointer"
           />
-        ) : (
-          <>
-            <canvas
-              ref={canvasRef}
-              className="max-w-full max-h-full w-full h-full object-contain cursor-pointer"
-            />
-            {showControls ? (
-              <div className="absolute left-5 bottom-28 z-20 max-w-md rounded-xl bg-black/80 backdrop-blur-sm border border-white/12 px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
-                <p className="text-xs text-zinc-300 leading-snug">
-                  Mode Aperçu · Chargez un fichier <strong className="text-white">.mp4 / .webm</strong> pour lire votre épisode en HD.
-                </p>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    fileInputRef.current?.click();
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  Charger un fichier
-                </button>
-              </div>
-            ) : null}
-          </>
-        )}
+        ) : null}
 
-        {/* Top Cinema Bar */}
+        {/* Loading Stream State */}
+        {isLoadingSource ? (
+          <div className="flex flex-col items-center justify-center gap-3 text-center px-6">
+            <Loader2 className="w-8 h-8 text-[#FF5E1A] animate-spin" />
+            <p className="text-sm text-zinc-300">
+              Chargement de l’épisode {episode.number}…
+            </p>
+          </div>
+        ) : null}
+
+        {/* Top Bar */}
         <div
-          className={`absolute inset-x-0 top-0 z-20 flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-3.5 bg-gradient-to-b from-black/95 via-black/70 to-transparent transition-opacity duration-200 ${
-            showControls || mode === 'trailer'
+          className={`absolute inset-x-0 top-0 z-20 flex items-center justify-between gap-2 sm:gap-4 pt-[max(0.75rem,env(safe-area-inset-top))] pb-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:px-6 bg-gradient-to-b from-black/95 via-black/70 to-transparent transition-opacity duration-200 ${
+            showControls || !videoSrc
               ? 'opacity-100'
               : 'opacity-0 pointer-events-none'
           }`}
         >
-          <div className="min-w-0 max-w-md">
-            <p className="text-xs font-medium text-zinc-300 truncate">
+          <div className="min-w-0 flex-1">
+            <p className="text-[11px] sm:text-xs font-medium text-zinc-300 truncate">
               {anime.title} · S{episode.season} E{episode.number} · {preferences.quality} HD
             </p>
             <h2 className="text-sm sm:text-base font-display font-semibold text-white truncate">
@@ -937,126 +598,36 @@ export function VideoPlayerModal({
             </h2>
           </div>
 
-          {/* Source & Mode Switcher */}
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <div className="flex items-center gap-1 p-1 rounded-lg bg-white/10">
-              {anime.trailerYoutubeId ? (
-                <button
-                  type="button"
-                  onClick={() => setMode('trailer')}
-                  className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                    mode === 'trailer'
-                      ? 'bg-[#FF5E1A] text-white'
-                      : 'text-zinc-200 hover:text-white'
-                  }`}
-                >
-                  Bande-annonce
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (videoSrc) {
-                    setMode('video');
-                  } else {
-                    fileInputRef.current?.click();
-                  }
-                }}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                  mode === 'video'
-                    ? 'bg-[#FF5E1A] text-white'
-                    : 'text-zinc-200 hover:text-white'
-                }`}
-              >
-                <Upload className="w-3 h-3" />
-                <span>{videoSrc ? 'Fichier vidéo' : 'Charger .mp4'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setMode('canvas')}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                  mode === 'canvas'
-                    ? 'bg-[#FF5E1A] text-white'
-                    : 'text-zinc-200 hover:text-white'
-                }`}
-              >
-                <Film className="w-3 h-3" />
-                <span>Aperçu</span>
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setUrlInputOpen((prev) => !prev)}
-              title="Lire une URL vidéo (.m3u8, .mp4, .webm)"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Link2 className="w-3.5 h-3.5" />
-              <span className="hidden md:inline">URL / M3U8</span>
-            </button>
-
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               type="button"
               onClick={handleStopAndExit}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/10 hover:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+              className="inline-flex items-center justify-center gap-1.5 px-3 min-h-[40px] sm:min-h-[36px] rounded-lg bg-white/10 hover:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
             >
               <Square className="w-3 h-3 fill-current" />
-              <span>Arrêter et sauvegarder</span>
+              <span className="sm:hidden">Sauver</span>
+              <span className="hidden sm:inline">Arrêter et sauvegarder</span>
             </button>
 
             <button
               type="button"
               onClick={() => setShowEpisodesDrawer((prev) => !prev)}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
+              className="inline-flex items-center justify-center gap-1 px-2.5 min-h-[40px] sm:min-h-[36px] rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer"
             >
               <span>Épisodes</span>
-              <ChevronRight className="w-3.5 h-3.5" />
+              <ChevronRight className="w-3.5 h-3.5 hidden sm:inline" />
             </button>
 
             <button
               type="button"
               onClick={handleStopAndExit}
               aria-label="Fermer le lecteur"
-              className="p-2 rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
+              className="min-h-[40px] min-w-[40px] sm:min-h-[36px] sm:min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
         </div>
-
-        {/* Direct MP4/WebM URL Bar */}
-        {urlInputOpen ? (
-          <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 w-full max-w-lg px-4">
-            <div className="rounded-xl bg-[#13151B] border border-white/15 p-3 shadow-2xl flex items-center gap-2">
-              <input
-                type="url"
-                value={urlDraft}
-                onChange={(e) => setUrlDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleApplyDirectUrl();
-                }}
-                placeholder="https://exemple.com/flux.m3u8 ou episode.mp4"
-                className="flex-1 bg-black/50 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-[#FF5E1A]"
-              />
-              <button
-                type="button"
-                onClick={handleApplyDirectUrl}
-                className="px-3.5 py-2 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold whitespace-nowrap cursor-pointer"
-              >
-                Lire
-              </button>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-3 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-medium whitespace-nowrap cursor-pointer"
-              >
-                Fichier local
-              </button>
-            </div>
-          </div>
-        ) : null}
 
         {/* Saved notice toast */}
         {savedNotice ? (
@@ -1067,52 +638,32 @@ export function VideoPlayerModal({
         ) : null}
 
         {/* Video Error Banner */}
-        {videoError && mode === 'video' ? (
-          <div className="absolute z-20 max-w-md mx-4 rounded-xl bg-[#13151B]/95 border border-red-500/35 p-5 text-center">
+        {videoError && !isLoadingSource ? (
+          <div className="absolute z-20 max-w-md mx-4 rounded-xl bg-[#13151B]/95 border border-white/15 p-6 text-center">
             <p className="text-sm text-zinc-200 mb-4">{videoError}</p>
             <div className="flex items-center justify-center gap-2">
+              {nextEpisode ? (
+                <button
+                  type="button"
+                  onClick={() => onSelectEpisode(nextEpisode, 0)}
+                  className="px-4 py-2 rounded-lg bg-[#FF5E1A] text-white text-xs font-semibold cursor-pointer"
+                >
+                  Épisode suivant
+                </button>
+              ) : null}
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="px-4 py-2 rounded-lg bg-[#FF5E1A] text-white text-xs font-semibold cursor-pointer"
-              >
-                Choisir un fichier vidéo
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setVideoError(null);
-                  setMode('canvas');
-                }}
+                onClick={handleStopAndExit}
                 className="px-4 py-2 rounded-lg bg-white/10 text-zinc-200 text-xs font-medium cursor-pointer"
               >
-                Mode Aperçu
+                Fermer
               </button>
             </div>
           </div>
         ) : null}
 
-        {/* Prompt to re-select local file if resuming a previously uploaded local file */}
-        {mode !== 'trailer' &&
-        !videoSrc &&
-        videoFileName &&
-        !isPlaying ? (
-          <div className="absolute top-20 right-6 z-20 max-w-xs rounded-xl bg-[#13151B]/95 border border-white/15 p-3.5">
-            <p className="text-xs text-zinc-300 mb-2">
-              Fichier précédemment utilisé : <strong className="text-white">{videoFileName}</strong>. Sélectionnez-le à nouveau pour reprendre la vidéo à {formatTimecode(currentTime)}.
-            </p>
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="px-3 py-1.5 rounded-lg bg-[#FF5E1A] text-white text-xs font-semibold cursor-pointer"
-            >
-              Recharger le fichier
-            </button>
-          </div>
-        ) : null}
-
         {/* Paused Overlay */}
-        {!isPlaying && mode !== 'trailer' && !showEpisodesDrawer && !videoError ? (
+        {videoSrc && !isPlaying && !showEpisodesDrawer && !videoError && !isLoadingSource ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/45 pointer-events-none">
             <div className="pointer-events-auto flex flex-col items-center text-center px-6 py-5 rounded-xl bg-[#111319]/92 border border-white/12 max-w-md mx-4">
               <span className="text-xs font-mono tabular-nums text-[#FF5E1A] mb-1">
@@ -1152,7 +703,7 @@ export function VideoPlayerModal({
           <button
             type="button"
             onClick={() => seekTo(episode.introEnd + 1)}
-            className="absolute right-6 bottom-28 z-20 inline-flex items-center gap-2 px-4 py-2.5 rounded-lg bg-black/80 hover:bg-[#FF5E1A] border border-white/20 text-white text-xs font-semibold transition-colors cursor-pointer"
+            className="absolute right-4 sm:right-6 bottom-28 z-20 inline-flex items-center gap-2 px-4 min-h-[44px] rounded-lg bg-black/80 hover:bg-[#FF5E1A] border border-white/20 text-white text-xs font-semibold transition-colors cursor-pointer"
           >
             <span>Passer l’intro</span>
             <FastForward className="w-3.5 h-3.5" />
@@ -1161,48 +712,35 @@ export function VideoPlayerModal({
 
         {/* Next Episode Prompt */}
         {nextCountdown !== null && nextEpisode ? (
-          <div className="absolute right-6 bottom-28 z-20 flex items-center gap-3 px-4 py-3 rounded-xl bg-[#13151B]/95 border border-white/15">
-            <div className="text-left">
+          <div className="absolute right-4 sm:right-6 bottom-28 z-20 max-w-[calc(100vw-2rem)] flex items-center gap-3 px-4 py-3 rounded-xl bg-[#13151B]/95 border border-white/15">
+            <div className="text-left min-w-0">
               <p className="text-xs text-zinc-400 tabular-nums">
                 Épisode suivant dans {nextCountdown}s
               </p>
-              <p className="text-sm font-medium text-white">
+              <p className="text-sm font-medium text-white truncate">
                 E{nextEpisode.number} · {nextEpisode.title}
               </p>
             </div>
             <button
               type="button"
               onClick={() => onSelectEpisode(nextEpisode, 0)}
-              className="px-3.5 py-2 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold whitespace-nowrap cursor-pointer"
+              className="px-3.5 min-h-[40px] rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-white text-xs font-semibold whitespace-nowrap shrink-0 cursor-pointer"
             >
-              Lancer maintenant
+              Lancer
             </button>
           </div>
         ) : null}
 
-        {/* Synchronized Subtitles */}
-        {activeSubtitle ? (
+        {/* Bottom Controls */}
+        {videoSrc ? (
           <div
-            className={`absolute inset-x-0 z-10 flex justify-center px-6 pointer-events-none transition-all duration-200 ${
-              showControls ? 'bottom-28' : 'bottom-10'
-            }`}
-          >
-            <p className="px-4 py-1.5 rounded-md bg-black/75 text-white text-sm sm:text-base md:text-lg font-medium text-center max-w-3xl leading-snug shadow-sm">
-              {activeSubtitle}
-            </p>
-          </div>
-        ) : null}
-
-        {/* Bottom Cinema Controls (hidden in YouTube trailer mode since YT has native controls) */}
-        {mode !== 'trailer' ? (
-          <div
-            className={`absolute inset-x-0 bottom-0 z-20 px-5 pb-4 pt-12 bg-gradient-to-t from-black/95 via-black/70 to-transparent transition-opacity duration-200 ${
+            className={`absolute inset-x-0 bottom-0 z-20 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:px-5 pb-[max(1rem,env(safe-area-inset-bottom))] pt-10 bg-gradient-to-t from-black/95 via-black/75 to-transparent transition-opacity duration-200 ${
               showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
             }`}
           >
             {/* Timeline Scrubber */}
             <div
-              className="relative group mb-3 py-1.5"
+              className="relative group mb-2 sm:mb-3 py-2.5 sm:py-1.5"
               onMouseMove={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 const pct = Math.max(
@@ -1247,18 +785,18 @@ export function VideoPlayerModal({
                 step={1}
                 value={currentTime}
                 onChange={(e) => seekTo(Number(e.target.value))}
-                className="kuro-range absolute inset-0 w-full h-full opacity-0 group-hover:opacity-100"
+                className="kuro-range absolute inset-0 w-full h-full opacity-100 md:opacity-0 md:group-hover:opacity-100"
               />
             </div>
 
             {/* Controls Row */}
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex items-center gap-2 sm:gap-3">
+            <div className="flex items-center justify-between gap-2 sm:gap-4">
+              <div className="flex items-center gap-1 sm:gap-3 min-w-0">
                 <button
                   type="button"
                   onClick={handlePauseAndSave}
                   aria-label={isPlaying ? 'Mettre en pause' : 'Lire'}
-                  className="p-2 rounded-lg text-white hover:bg-white/10 transition-colors cursor-pointer"
+                  className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0"
                 >
                   {isPlaying ? (
                     <Pause className="w-5 h-5 fill-current" />
@@ -1271,7 +809,7 @@ export function VideoPlayerModal({
                   type="button"
                   onClick={() => seekTo(currentTime - 10)}
                   aria-label="Reculer de 10 secondes"
-                  className="px-2 py-1.5 rounded-lg text-xs font-mono tabular-nums text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
+                  className="px-2 min-h-[44px] rounded-lg text-xs font-mono tabular-nums text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer shrink-0"
                 >
                   -10s
                 </button>
@@ -1280,7 +818,7 @@ export function VideoPlayerModal({
                   type="button"
                   onClick={() => seekTo(currentTime + 10)}
                   aria-label="Avancer de 10 secondes"
-                  className="px-2 py-1.5 rounded-lg text-xs font-mono tabular-nums text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
+                  className="px-2 min-h-[44px] rounded-lg text-xs font-mono tabular-nums text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer shrink-0"
                 >
                   +10s
                 </button>
@@ -1290,14 +828,14 @@ export function VideoPlayerModal({
                     type="button"
                     onClick={() => onSelectEpisode(nextEpisode, 0)}
                     aria-label="Épisode suivant"
-                    className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-200 hover:bg-white/10 transition-colors whitespace-nowrap cursor-pointer"
+                    className="hidden sm:inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg text-xs font-medium text-zinc-200 hover:bg-white/10 transition-colors whitespace-nowrap cursor-pointer"
                   >
                     <SkipForward className="w-4 h-4" />
                     <span>Suivant</span>
                   </button>
                 ) : null}
 
-                <div className="hidden md:flex items-center gap-2 ml-1">
+                <div className="flex items-center gap-2 ml-0.5 sm:ml-1 shrink-0">
                   <button
                     type="button"
                     onClick={() =>
@@ -1306,7 +844,7 @@ export function VideoPlayerModal({
                     aria-label={
                       preferences.muted ? 'Activer le son' : 'Couper le son'
                     }
-                    className="p-1.5 rounded-lg text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
+                    className="min-h-[44px] min-w-[40px] flex items-center justify-center rounded-lg text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
                   >
                     {preferences.muted || preferences.volume === 0 ? (
                       <VolumeX className="w-4 h-4" />
@@ -1327,11 +865,11 @@ export function VideoPlayerModal({
                         muted: Number(e.target.value) === 0,
                       })
                     }
-                    className="kuro-range w-20 h-1 bg-white/25 rounded-full"
+                    className="kuro-range hidden md:block w-20 h-1 bg-white/25 rounded-full"
                   />
                 </div>
 
-                <span className="ml-2 text-xs font-mono tabular-nums text-zinc-200 whitespace-nowrap">
+                <span className="ml-1 sm:ml-2 text-[11px] sm:text-xs font-mono tabular-nums text-zinc-200 whitespace-nowrap truncate">
                   {formatTimecode(currentTime)}{' '}
                   <span className="text-zinc-500">
                     / {formatTimecode(duration)}
@@ -1339,36 +877,12 @@ export function VideoPlayerModal({
                 </span>
               </div>
 
-              <div className="flex items-center gap-2 relative">
-                <button
-                  type="button"
-                  onClick={() =>
-                    onUpdatePreferences({
-                      subtitleLang:
-                        preferences.subtitleLang === 'fr'
-                          ? 'jp'
-                          : preferences.subtitleLang === 'jp'
-                            ? 'off'
-                            : 'fr',
-                    })
-                  }
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-zinc-200 hover:bg-white/10 transition-colors whitespace-nowrap cursor-pointer"
-                >
-                  <Subtitles className="w-4 h-4" />
-                  <span>
-                    {preferences.subtitleLang === 'fr'
-                      ? 'ST: FR'
-                      : preferences.subtitleLang === 'jp'
-                        ? 'ST: JP'
-                        : 'ST: Off'}
-                  </span>
-                </button>
-
+              <div className="flex items-center gap-1 sm:gap-2 relative shrink-0">
                 <button
                   type="button"
                   onClick={() => setShowSettings((prev) => !prev)}
                   aria-label="Paramètres vidéo"
-                  className={`p-2 rounded-lg transition-colors cursor-pointer ${
+                  className={`min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg transition-colors cursor-pointer ${
                     showSettings
                       ? 'bg-[#FF5E1A] text-white'
                       : 'text-zinc-200 hover:bg-white/10'
@@ -1383,7 +897,7 @@ export function VideoPlayerModal({
                   aria-label={
                     isFullscreen ? 'Quitter le plein écran' : 'Plein écran'
                   }
-                  className="p-2 rounded-lg text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
+                  className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg text-zinc-200 hover:bg-white/10 transition-colors cursor-pointer"
                 >
                   {isFullscreen ? (
                     <Minimize className="w-4 h-4" />
@@ -1393,7 +907,7 @@ export function VideoPlayerModal({
                 </button>
 
                 {showSettings ? (
-                  <div className="absolute right-0 bottom-12 w-72 rounded-xl bg-[#13151B] border border-white/12 p-4 shadow-2xl space-y-4">
+                  <div className="absolute right-0 bottom-14 w-[calc(100vw-2rem)] sm:w-72 max-h-[58dvh] overflow-y-auto overscroll-contain rounded-xl bg-[#13151B] border border-white/12 p-4 shadow-2xl space-y-4">
                     <div>
                       <p className="text-xs font-medium text-zinc-400 mb-2">
                         Qualité vidéo
@@ -1496,24 +1010,61 @@ export function VideoPlayerModal({
 
       {/* Episodes Side Drawer */}
       {showEpisodesDrawer ? (
-        <aside className="absolute top-0 right-0 bottom-0 z-30 w-full max-w-sm bg-[#111319]/96 backdrop-blur-md border-l border-white/10 flex flex-col">
+        <aside className="absolute top-0 right-0 bottom-0 z-30 w-full max-w-sm bg-[#111319]/96 backdrop-blur-md border-l border-white/10 flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
           <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
-            <div>
-              <p className="text-xs text-zinc-400">{anime.title}</p>
+            <div className="min-w-0">
+              <p className="text-xs text-zinc-400 truncate">{anime.title}</p>
               <h3 className="text-sm font-display font-semibold text-white">
-                Liste des épisodes ({anime.episodes.length})
+                Saison {drawerSeasonNum} · {drawerEpisodes.length} épisodes
               </h3>
             </div>
             <button
               type="button"
               onClick={() => setShowEpisodesDrawer(false)}
-              className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 cursor-pointer"
+              aria-label="Fermer la liste des épisodes"
+              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           </div>
+          {seasons.length > 1 ? (
+            <div className="flex items-center gap-1.5 px-4 py-2.5 border-b border-white/10 overflow-x-auto no-scrollbar shrink-0">
+              {seasons.map((s) => {
+                const isSeasonUpcoming =
+                  s.status === 'À venir' ||
+                  s.episodes.filter((e) => !e.isUpcoming).length === 0;
+                if (isSeasonUpcoming) {
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      disabled
+                      className="px-3 min-h-[36px] rounded-lg text-xs font-medium whitespace-nowrap shrink-0 flex items-center gap-1 bg-white/3 text-zinc-500 cursor-not-allowed"
+                    >
+                      <Clock className="w-3 h-3 text-amber-400/80" />
+                      <span>S{s.seasonNumber} · À venir</span>
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setDrawerSeasonNum(s.seasonNumber)}
+                    className={`px-3 min-h-[36px] rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      s.seasonNumber === drawerSeasonNum
+                        ? 'bg-[#FF5E1A] text-white'
+                        : 'bg-white/6 text-zinc-300 hover:bg-white/12'
+                    }`}
+                  >
+                    Saison {s.seasonNumber}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
           <div className="flex-1 overflow-y-auto divide-y divide-white/8">
-            {anime.episodes.map((ep) => {
+            {drawerEpisodes.map((ep) => {
               const prog = progressByEpisode[ep.id];
               const pct =
                 prog && ep.duration > 0
@@ -1564,6 +1115,24 @@ export function VideoPlayerModal({
                 </button>
               );
             })}
+            {activeDrawerSeason?.status === 'En cours' &&
+            activeDrawerSeason.nextAiringEpisode &&
+            activeDrawerSeason.nextAiringEpisode > drawerEpisodes.length ? (
+              <div className="p-4 opacity-75 select-none flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs font-mono tabular-nums text-amber-300">
+                    Épisode {activeDrawerSeason.nextAiringEpisode} · À venir
+                  </p>
+                  <p className="text-xs text-zinc-400 truncate mt-0.5">
+                    {formatAiringDateFr(activeDrawerSeason.nextAiringAt)}
+                  </p>
+                </div>
+                <span className="inline-flex items-center gap-1 text-[11px] text-zinc-400 shrink-0">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  Indisponible
+                </span>
+              </div>
+            ) : null}
           </div>
         </aside>
       ) : null}
