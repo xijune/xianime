@@ -1,0 +1,6 @@
+{
+  "name": "KuroStream",
+  "description": "Plateforme de streaming d'animés en haute définition avec arrêt et reprise instantanée de lecture, mode cinéma et calendrier simulcast.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
