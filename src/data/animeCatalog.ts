@@ -261,6 +261,7 @@ export function formatUpcomingNoticeFr(info: {
 export interface SimulcastScheduleItem {
   id: string;
   anime: AnimeSeries;
+  seasonNumber?: number;
   episodeNumber: number;
   day: SimulcastDay;
   time: string;

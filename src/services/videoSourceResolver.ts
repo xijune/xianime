@@ -19,12 +19,18 @@ export async function resolveEpisodeVideoUrl(
   }
 
   try {
+    const activeSeason = anime.seasons?.find(
+      (s) => s.seasonNumber === episode.season
+    );
     const response = await fetch(VIDEO_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         animeId: anime.id,
         slug: anime.slug,
+        title: anime.title,
+        seasonSlug: activeSeason?.slug ?? anime.slug,
+        seasonTitle: activeSeason?.title ?? anime.title,
         episodeNumber: episode.number,
         season: episode.season,
       }),

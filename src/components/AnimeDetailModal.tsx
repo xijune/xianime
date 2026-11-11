@@ -42,7 +42,14 @@ export function AnimeDetailModal({
 }: AnimeDetailModalProps) {
   const [seriesData, setSeriesData] = useState<AnimeSeries>(anime);
   const [selectedSeasonNum, setSelectedSeasonNum] = useState<number>(() => {
-    return latestProgress?.snapshot?.episode?.season || 1;
+    if (
+      latestProgress &&
+      !latestProgress.completed &&
+      latestProgress.currentTime > 3
+    ) {
+      return latestProgress.snapshot?.episode?.season || 1;
+    }
+    return 1;
   });
   const [enrichedBySeason, setEnrichedBySeason] = useState<Record<number, Episode[]>>({});
   const [loadingSeasons, setLoadingSeasons] = useState(false);
@@ -62,7 +69,12 @@ export function AnimeDetailModal({
           setSeriesData(full);
           const availableSeasons = getSeriesSeasons(full);
           const firstPlayable = availableSeasons.find((s) => s.episodes.length > 0);
-          const resumeSeason = latestProgress?.snapshot?.episode?.season;
+          const resumeSeason =
+            latestProgress &&
+            !latestProgress.completed &&
+            latestProgress.currentTime > 3
+              ? latestProgress.snapshot?.episode?.season
+              : undefined;
           if (
             resumeSeason &&
             availableSeasons.some(
@@ -157,14 +169,12 @@ export function AnimeDetailModal({
   );
 
   const primaryEpisode = useMemo(() => {
-    if (latestProgress) {
-      for (const s of mergedSeasons) {
-        const match = s.episodes.find(
-          (ep) => ep.id === latestProgress.episodeId && !ep.isUpcoming
-        );
-        if (match && !latestProgress.completed) {
-          return { episode: match, startAt: latestProgress.currentTime };
-        }
+    if (latestProgress && !latestProgress.completed && latestProgress.currentTime > 3) {
+      const matchInActiveSeason = episodes.find(
+        (ep) => ep.id === latestProgress.episodeId && !ep.isUpcoming
+      );
+      if (matchInActiveSeason) {
+        return { episode: matchInActiveSeason, startAt: latestProgress.currentTime };
       }
     }
     const firstPlayable =

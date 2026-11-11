@@ -210,7 +210,6 @@ function getRelatedSeasonEdges(raw: AniListMediaRaw): Array<{
     if (!edge?.node) continue;
     if (edge.relationType !== 'PREQUEL' && edge.relationType !== 'SEQUEL') continue;
     if (edge.node.type && edge.node.type !== 'ANIME') continue;
-    if (edge.node.format && !TV_SEASON_FORMATS.has(edge.node.format)) continue;
     results.push({ relationType: edge.relationType, node: edge.node });
   }
   return results;
@@ -388,12 +387,82 @@ function mapAniListMedia(raw: AniListMediaRaw, featured = false): AnimeSeries {
 }
 
 /**
+ * Orders media belonging to the same franchise strictly from Season 1 -> Season N
+ * using PREQUEL/SEQUEL topological edges first, with startDate as tiebreaker.
+ */
+function sortFranchiseMedia(members: AniListMediaRaw[]): AniListMediaRaw[] {
+  if (members.length <= 1) return [...members];
+
+  const byId = new Map<number, AniListMediaRaw>(members.map((m) => [m.id, m]));
+  const nextIds = new Map<number, Set<number>>();
+  const inDegree = new Map<number, number>();
+
+  for (const m of members) {
+    nextIds.set(m.id, new Set());
+    inDegree.set(m.id, 0);
+  }
+
+  for (const m of members) {
+    for (const rel of getRelatedSeasonEdges(m)) {
+      if (!byId.has(rel.node.id) || rel.node.id === m.id) continue;
+      if (rel.relationType === 'SEQUEL') {
+        if (!nextIds.get(m.id)!.has(rel.node.id)) {
+          nextIds.get(m.id)!.add(rel.node.id);
+          inDegree.set(rel.node.id, (inDegree.get(rel.node.id) ?? 0) + 1);
+        }
+      } else if (rel.relationType === 'PREQUEL') {
+        if (!nextIds.get(rel.node.id)!.has(m.id)) {
+          nextIds.get(rel.node.id)!.add(m.id);
+          inDegree.set(m.id, (inDegree.get(m.id) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  const byDate = (a: AniListMediaRaw, b: AniListMediaRaw) =>
+    fuzzyDateScore(a.startDate, a.seasonYear) -
+    fuzzyDateScore(b.startDate, b.seasonYear);
+
+  const ready = members.filter((m) => (inDegree.get(m.id) ?? 0) === 0).sort(byDate);
+  const ordered: AniListMediaRaw[] = [];
+  const placed = new Set<number>();
+
+  while (ready.length > 0) {
+    const current = ready.shift()!;
+    if (placed.has(current.id)) continue;
+    placed.add(current.id);
+    ordered.push(current);
+
+    for (const succId of nextIds.get(current.id) ?? []) {
+      const deg = (inDegree.get(succId) ?? 1) - 1;
+      inDegree.set(succId, deg);
+      if (deg <= 0 && !placed.has(succId)) {
+        const succ = byId.get(succId);
+        if (succ) {
+          ready.push(succ);
+          ready.sort(byDate);
+        }
+      }
+    }
+  }
+
+  if (ordered.length < members.length) {
+    const remaining = members.filter((m) => !placed.has(m.id)).sort(byDate);
+    ordered.push(...remaining);
+  }
+
+  return ordered;
+}
+
+/**
  * Groups entries belonging to the same anime franchise (via PREQUEL / SEQUEL relations)
- * so catalog and search grids display one card per anime with its grouped seasons.
+ * so catalog and search grids display one card per anime with its grouped seasons,
+ * preserving the order of `seedIds` if provided.
  */
 function groupFranchiseCatalog(
   rawItems: AniListMediaRaw[],
-  featuredCount = 0
+  featuredCount = 0,
+  seedIds?: Set<number>
 ): AnimeSeries[] {
   const valid = rawItems.filter((m) => m.coverImage?.extraLarge || m.bannerImage);
   if (valid.length === 0) return [];
@@ -412,7 +481,7 @@ function groupFranchiseCatalog(
     }
   }
 
-  // Also link items that point to the exact same prequel ID even if that prequel isn't in `valid`
+  // Also link items that point to the exact same prequel/sequel ID even if that neighbor isn't in `valid`
   const bySharedNeighbor = new Map<number, number[]>();
   for (const item of valid) {
     for (const rel of getRelatedSeasonEdges(item)) {
@@ -434,7 +503,6 @@ function groupFranchiseCatalog(
   for (const item of valid) {
     if (visited.has(item.id)) continue;
 
-    // BFS component
     const compIds: number[] = [];
     const queue = [item.id];
     visited.add(item.id);
@@ -449,13 +517,15 @@ function groupFranchiseCatalog(
       }
     }
 
-    const members = compIds
-      .map((cid) => byId.get(cid)!)
-      .sort(
-        (a, b) =>
-          fuzzyDateScore(a.startDate, a.seasonYear) -
-          fuzzyDateScore(b.startDate, b.seasonYear)
-      );
+    if (seedIds && !compIds.some((cid) => seedIds.has(cid))) {
+      continue;
+    }
+
+    const orderedAll = sortFranchiseMedia(compIds.map((cid) => byId.get(cid)!));
+    const tvMembers = orderedAll.filter(
+      (m) => !m.format || TV_SEASON_FORMATS.has(m.format)
+    );
+    const members = tvMembers.length > 0 ? tvMembers : orderedAll;
 
     const rootRaw = members[0];
     const rootSeries = mapAniListMedia(
@@ -493,6 +563,10 @@ function groupFranchiseCatalog(
         rootSeries.nextAiringAt = ongoingSeason.nextAiringAt;
         rootSeries.nextAiringEpisode = ongoingSeason.nextAiringEpisode;
       }
+    }
+
+    for (const m of members) {
+      franchiseCache.set(m.id, rootSeries);
     }
 
     groupedSeries.push(rootSeries);
@@ -601,6 +675,86 @@ async function queryAniList<T>(query: string, variables: Record<string, unknown>
 }
 
 const franchiseCache = new Map<number, AnimeSeries>();
+const mediaRawCache = new Map<number, AniListMediaRaw>();
+
+/**
+ * Batch-fetches connected PREQUEL / SEQUEL TV/ONA seasons for any seed media list
+ * so Season 1 is always discovered and ordered properly right from Home, Search, and Simulcast.
+ */
+async function hydrateFranchiseMedia(
+  seedMedia: AniListMediaRaw[],
+  maxHops = 3
+): Promise<AniListMediaRaw[]> {
+  const orderedMap = new Map<number, AniListMediaRaw>();
+
+  for (const item of seedMedia) {
+    mediaRawCache.set(item.id, item);
+    orderedMap.set(item.id, item);
+  }
+
+  try {
+    let hop = 0;
+    while (hop < maxHops) {
+      hop += 1;
+      const missingIds = new Set<number>();
+
+      for (const item of orderedMap.values()) {
+        for (const rel of getRelatedSeasonEdges(item)) {
+          if (orderedMap.has(rel.node.id)) continue;
+          const cached = mediaRawCache.get(rel.node.id);
+          if (cached) {
+            orderedMap.set(cached.id, cached);
+          } else {
+            missingIds.add(rel.node.id);
+          }
+        }
+      }
+
+      if (missingIds.size === 0) break;
+
+      const allMissing = Array.from(missingIds);
+      const chunks: number[][] = [];
+      for (let i = 0; i < allMissing.length && chunks.length < 3; i += 50) {
+        chunks.push(allMissing.slice(i, i + 50));
+      }
+
+      const query = `
+        query BatchFranchise($ids: [Int]) {
+          Page(page: 1, perPage: 50) {
+            media(id_in: $ids, type: ANIME, isAdult: false) {
+              ${MEDIA_FRAGMENT}
+            }
+          }
+        }
+      `;
+
+      const responses = await Promise.all(
+        chunks.map((ids) =>
+          queryAniList<{
+            Page: { media: AniListMediaRaw[] };
+          }>(query, { ids })
+        )
+      );
+
+      let added = 0;
+      for (const data of responses) {
+        for (const fetched of data.Page.media) {
+          mediaRawCache.set(fetched.id, fetched);
+          if (!orderedMap.has(fetched.id)) {
+            orderedMap.set(fetched.id, fetched);
+            added += 1;
+          }
+        }
+      }
+
+      if (added === 0) break;
+    }
+  } catch {
+    // Keep already-collected items if secondary batch fails
+  }
+
+  return Array.from(orderedMap.values());
+}
 
 /**
  * Fetches all connected TV/ONA seasons (PREQUEL -> SEQUEL chain) for an anime
@@ -618,8 +772,24 @@ export async function fetchAllSeasonsForAnime(anime: AnimeSeries): Promise<Anime
 
     while (frontierIds.length > 0 && hops < 4) {
       hops += 1;
-      const batch = frontierIds.filter((id) => !collected.has(id)).slice(0, 20);
-      if (batch.length === 0) break;
+      const batch: number[] = [];
+      for (const id of frontierIds) {
+        if (collected.has(id)) continue;
+        const cachedRaw = mediaRawCache.get(id);
+        if (cachedRaw) {
+          collected.set(id, cachedRaw);
+          for (const rel of getRelatedSeasonEdges(cachedRaw)) {
+            if (!collected.has(rel.node.id)) {
+              frontierIds.push(rel.node.id);
+            }
+          }
+        } else {
+          batch.push(id);
+        }
+      }
+
+      const uniqueBatch = Array.from(new Set(batch)).slice(0, 25);
+      if (uniqueBatch.length === 0) break;
 
       const query = `
         query BatchSeasons($ids: [Int]) {
@@ -633,10 +803,11 @@ export async function fetchAllSeasonsForAnime(anime: AnimeSeries): Promise<Anime
 
       const data = await queryAniList<{
         Page: { media: AniListMediaRaw[] };
-      }>(query, { ids: batch });
+      }>(query, { ids: uniqueBatch });
 
       const nextFrontier = new Set<number>();
       for (const item of data.Page.media) {
+        mediaRawCache.set(item.id, item);
         collected.set(item.id, item);
         for (const rel of getRelatedSeasonEdges(item)) {
           if (!collected.has(rel.node.id)) {
@@ -647,25 +818,19 @@ export async function fetchAllSeasonsForAnime(anime: AnimeSeries): Promise<Anime
       frontierIds = Array.from(nextFrontier);
     }
 
-    const allMedia = Array.from(collected.values()).filter(
-      (m) => m.id === anime.anilistId || !m.format || TV_SEASON_FORMATS.has(m.format)
+    const orderedAll = sortFranchiseMedia(Array.from(collected.values()));
+    const tvMembers = orderedAll.filter(
+      (m) => !m.format || TV_SEASON_FORMATS.has(m.format)
     );
+    const allMedia = tvMembers.length > 0 ? tvMembers : orderedAll;
 
     if (allMedia.length <= 1) {
       franchiseCache.set(anime.anilistId, anime);
       return anime;
     }
-
-    // Order chronologically by start date / seasonYear
-    allMedia.sort(
-      (a, b) =>
-        fuzzyDateScore(a.startDate, a.seasonYear) -
-        fuzzyDateScore(b.startDate, b.seasonYear)
-    );
-
     const rootRaw = allMedia[0];
     const baseSeries = mapAniListMedia(rootRaw, anime.featured);
-    const rootId = anime.id;
+    const rootId = baseSeries.id;
 
     const seasons: AnimeSeason[] = allMedia.map((m, idx) =>
       buildSeasonFromMedia(
@@ -738,8 +903,27 @@ export async function fetchHomeCatalog(): Promise<{
     popular: { media: AniListMediaRaw[] };
   }>(query, {});
 
-  const trending = groupFranchiseCatalog(data.trending.media, 4);
-  const popular = groupFranchiseCatalog(data.popular.media, 0);
+  const trendingSeedIds = new Set(data.trending.media.map((m) => m.id));
+  const popularSeedIds = new Set(data.popular.media.map((m) => m.id));
+
+  const hydratedAll = await hydrateFranchiseMedia([
+    ...data.trending.media,
+    ...data.popular.media,
+  ]);
+
+  // Preserve trending order first, then popular order
+  const byId = new Map(hydratedAll.map((m) => [m.id, m]));
+  const trendingPool = [
+    ...data.trending.media,
+    ...hydratedAll.filter((m) => !trendingSeedIds.has(m.id)),
+  ];
+  const popularPool = [
+    ...data.popular.media,
+    ...hydratedAll.filter((m) => !popularSeedIds.has(m.id) && byId.has(m.id)),
+  ];
+
+  const trending = groupFranchiseCatalog(trendingPool, 4, trendingSeedIds);
+  const popular = groupFranchiseCatalog(popularPool, 0, popularSeedIds);
 
   // Prefer series with crisp widescreen bannerImage for Hero spotlight
   const withBanners = trending.filter((a) => a.keyVisual && a.keyVisual !== a.posterImage);
@@ -779,7 +963,9 @@ export async function searchRealAnime(options: {
     perPage: options.perPage ?? 24,
   });
 
-  return groupFranchiseCatalog(data.Page.media, 0);
+  const seedIds = new Set(data.Page.media.map((m) => m.id));
+  const hydrated = await hydrateFranchiseMedia(data.Page.media);
+  return groupFranchiseCatalog(hydrated, 0, seedIds);
 }
 
 export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
@@ -813,12 +999,37 @@ export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
     };
   }>(query, { start: startOfWindow, end: endOfWindow });
 
+  const validRows = data.Page.airingSchedules.filter(
+    (r): r is { id: number; airingAt: number; episode: number; media: AniListMediaRaw } =>
+      Boolean(r.media && !r.media.isAdult)
+  );
+  const seedMedia = validRows.map((r) => r.media);
+  const seedIds = new Set(seedMedia.map((m) => m.id));
+  const hydrated = await hydrateFranchiseMedia(seedMedia);
+  const grouped = groupFranchiseCatalog(hydrated, 0, seedIds);
+
+  const seriesByAnilistId = new Map<number, { series: AnimeSeries; seasonNumber: number }>();
+  for (const series of grouped) {
+    for (const s of series.seasons ?? []) {
+      if (s.anilistId) {
+        seriesByAnilistId.set(s.anilistId, {
+          series,
+          seasonNumber: s.seasonNumber,
+        });
+      }
+    }
+    if (series.anilistId && !seriesByAnilistId.has(series.anilistId)) {
+      seriesByAnilistId.set(series.anilistId, { series, seasonNumber: 1 });
+    }
+  }
+
   const seenAnime = new Set<string>();
   const items: SimulcastScheduleItem[] = [];
 
-  for (const row of data.Page.airingSchedules) {
-    if (!row.media || row.media.isAdult) continue;
-    const anime = mapAniListMedia(row.media, false);
+  for (const row of validRows) {
+    const mapped = seriesByAnilistId.get(row.media.id);
+    const anime = mapped?.series ?? mapAniListMedia(row.media, false);
+    const seasonNumber = mapped?.seasonNumber ?? 1;
     if (seenAnime.has(anime.id)) continue;
     seenAnime.add(anime.id);
 
@@ -826,6 +1037,7 @@ export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
     items.push({
       id: `sched-${row.id}`,
       anime,
+      seasonNumber,
       episodeNumber: row.episode,
       day: day ?? 'Samedi',
       time: time ?? '18:30',

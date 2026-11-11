@@ -28,6 +28,7 @@ import {
   type SimulcastScheduleItem,
 } from './data/animeCatalog';
 import {
+  fetchAllSeasonsForAnime,
   fetchHomeCatalog,
   fetchWeeklySchedule,
   searchRealAnime,
@@ -214,6 +215,27 @@ export default function App() {
     ) => {
       if (!episode || episode.isUpcoming) return;
       setDetailAnime(null);
+
+      // If an older localStorage item wasn't hydrated with all franchise seasons yet, resolve Season 1 first
+      if (anime.anilistId && (!anime.seasons || anime.seasons.length <= 1)) {
+        void fetchAllSeasonsForAnime(anime)
+          .then((resolved) => {
+            const resolvedSeasons = getSeriesSeasons(resolved);
+            const targetSeason =
+              resolvedSeasons.find((s) => s.seasonNumber === episode.season) ??
+              resolvedSeasons[0];
+            const targetEp =
+              targetSeason?.episodes.find(
+                (e) => e.number === episode.number && !e.isUpcoming
+              ) ?? episode;
+            setPlayerState({ anime: resolved, episode: targetEp, startAt });
+          })
+          .catch(() => {
+            setPlayerState({ anime, episode, startAt });
+          });
+        return;
+      }
+
       setPlayerState({ anime, episode, startAt });
     },
     []
@@ -867,6 +889,15 @@ export default function App() {
                     .map((item) => {
                       const action = getPrimaryActionForAnime(item.anime);
                       const isSlotUpcoming = item.airingAt * 1000 > Date.now();
+                      const seasonNum = item.seasonNumber ?? 1;
+                      const seasonsList = getSeriesSeasons(item.anime);
+                      const slotEpisode = !isSlotUpcoming
+                        ? (seasonsList
+                            .find((s) => s.seasonNumber === seasonNum)
+                            ?.episodes.find(
+                              (e) => e.number === item.episodeNumber && !e.isUpcoming
+                            ) ?? action.episode)
+                        : action.episode;
                       return (
                         <div
                           key={item.id}
@@ -890,7 +921,10 @@ export default function App() {
                                 {item.anime.title}
                               </h3>
                               <p className="text-xs text-zinc-400 truncate mt-0.5">
-                                Épisode {item.episodeNumber} ·{' '}
+                                {seasonsList.length > 1
+                                  ? `S${seasonNum} Épisode ${item.episodeNumber}`
+                                  : `Épisode ${item.episodeNumber}`}{' '}
+                                ·{' '}
                                 <span
                                   className={
                                     isSlotUpcoming ? 'text-amber-300' : 'text-emerald-400'
@@ -904,25 +938,28 @@ export default function App() {
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            {action.episode ? (
+                            {slotEpisode ? (
                               <button
                                 type="button"
                                 onClick={() =>
                                   openPlayer(
                                     item.anime,
-                                    action.episode,
-                                    action.startAt
+                                    slotEpisode,
+                                    slotEpisode.id === action.episode?.id
+                                      ? action.startAt
+                                      : 0
                                   )
                                 }
                                 className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] active:bg-[#FF5E1A] text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer flex-1 sm:flex-initial"
                               >
                                 <Play className="w-3.5 h-3.5 fill-current" />
                                 <span>
-                                  {action.isResuming
+                                  {action.isResuming &&
+                                  slotEpisode.id === action.episode?.id
                                     ? `Reprendre (${formatTimecode(action.startAt)})`
                                     : isSlotUpcoming
-                                      ? `Voir E${action.episode.number}`
-                                      : 'Regarder'}
+                                      ? `Voir S${slotEpisode.season} E${slotEpisode.number}`
+                                      : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
                                 </span>
                               </button>
                             ) : (
@@ -1197,6 +1234,15 @@ export default function App() {
                         {list.map((item) => {
                           const action = getPrimaryActionForAnime(item.anime);
                           const isSlotUpcoming = item.airingAt * 1000 > Date.now();
+                          const seasonNum = item.seasonNumber ?? 1;
+                          const seasonsList = getSeriesSeasons(item.anime);
+                          const slotEpisode = !isSlotUpcoming
+                            ? (seasonsList
+                                .find((s) => s.seasonNumber === seasonNum)
+                                ?.episodes.find(
+                                  (e) => e.number === item.episodeNumber && !e.isUpcoming
+                                ) ?? action.episode)
+                            : action.episode;
                           return (
                             <div
                               key={item.id}
@@ -1215,7 +1261,10 @@ export default function App() {
                                     {item.anime.title}
                                   </button>
                                   <p className="text-xs text-zinc-400 truncate">
-                                    Épisode {item.episodeNumber} ·{' '}
+                                    {seasonsList.length > 1
+                                      ? `S${seasonNum} Épisode ${item.episodeNumber}`
+                                      : `Épisode ${item.episodeNumber}`}{' '}
+                                    ·{' '}
                                     <span
                                       className={
                                         isSlotUpcoming ? 'text-amber-300' : 'text-emerald-400'
@@ -1228,23 +1277,26 @@ export default function App() {
                                 </div>
                               </div>
 
-                              {action.episode ? (
+                              {slotEpisode ? (
                                 <button
                                   type="button"
                                   onClick={() =>
                                     openPlayer(
                                       item.anime,
-                                      action.episode,
-                                      action.startAt
+                                      slotEpisode,
+                                      slotEpisode.id === action.episode?.id
+                                        ? action.startAt
+                                        : 0
                                     )
                                   }
                                   className="px-3 min-h-[38px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                                 >
-                                  {action.isResuming
+                                  {action.isResuming &&
+                                  slotEpisode.id === action.episode?.id
                                     ? 'Reprendre'
                                     : isSlotUpcoming
-                                      ? `Voir E${action.episode.number}`
-                                      : 'Regarder'}
+                                      ? `Voir S${slotEpisode.season} E${slotEpisode.number}`
+                                      : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
                                 </button>
                               ) : (
                                 <button
