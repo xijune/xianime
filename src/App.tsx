@@ -16,8 +16,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
-  FALLBACK_ANIME_CATALOG,
-  formatAiringDateFr,
+  formatReleaseDateFr,
   formatRemainingMinutes,
   formatTimecode,
   getAllSeriesEpisodes,
@@ -113,6 +112,26 @@ export default function App() {
     startAt: number;
   } | null>(null);
 
+  const loadHomeCatalog = useCallback(() => {
+    setLoadingHome(true);
+    setApiNotice(null);
+    return Promise.all([fetchHomeCatalog(), fetchWeeklySchedule()])
+      .then(([homeData, schedData]) => {
+        if (homeData.featured.length > 0) setFeaturedSeries(homeData.featured);
+        if (homeData.trending.length > 0) {
+          setTrendingSeries(homeData.trending);
+          setCatalogSeries(homeData.popular.length > 0 ? homeData.popular : homeData.trending);
+        }
+        setSimulcastSchedule(schedData);
+        setApiNotice(null);
+        setLoadingHome(false);
+      })
+      .catch(() => {
+        setApiNotice('Impossible de charger les données AniList pour le moment.');
+        setLoadingHome(false);
+      });
+  }, []);
+
   // Initial real anime fetch from AniList
   useEffect(() => {
     let cancelled = false;
@@ -132,10 +151,7 @@ export default function App() {
       })
       .catch(() => {
         if (cancelled) return;
-        setFeaturedSeries(FALLBACK_ANIME_CATALOG.slice(0, 3));
-        setTrendingSeries(FALLBACK_ANIME_CATALOG);
-        setCatalogSeries(FALLBACK_ANIME_CATALOG);
-        setApiNotice('Mode hors-ligne actif (catalogue de secours affiché).');
+        setApiNotice('Impossible de charger les données AniList pour le moment.');
         setLoadingHome(false);
       });
 
@@ -310,8 +326,15 @@ export default function App() {
       </header>
 
       {apiNotice ? (
-        <div className="bg-[#181B24] border-b border-white/8 px-4 py-2 text-center text-xs text-amber-300">
-          {apiNotice}
+        <div className="bg-[#181B24] border-b border-white/8 px-4 py-2.5 flex items-center justify-center gap-3 text-xs text-amber-300">
+          <span>{apiNotice}</span>
+          <button
+            type="button"
+            onClick={() => void loadHomeCatalog()}
+            className="px-2.5 py-1 rounded bg-white/10 hover:bg-white/20 text-white font-medium cursor-pointer"
+          >
+            Réessayer
+          </button>
         </div>
       ) : null}
 
@@ -348,12 +371,21 @@ export default function App() {
                 <div className="relative sm:absolute sm:inset-0 flex items-end sm:items-center px-4 sm:px-10 pt-16 pb-6 sm:py-0">
                   <div className="max-w-xl w-full">
                     <p className="text-xs sm:text-sm text-zinc-300 mb-2 line-clamp-1">
-                      {activeHero.genres.join(' · ')} · {activeHero.year} ·{' '}
+                      {activeHero.genres.join(' · ')}
+                      {activeHero.year ? ` · ${activeHero.year}` : ''} ·{' '}
                       {activeHero.studio} ·{' '}
                       {activeHero.episodesCount === 0 || activeHero.status === 'À venir'
-                        ? `À venir${activeHero.nextAiringAt ? ` (${formatAiringDateFr(activeHero.nextAiringAt)})` : ''}`
-                        : `${activeHero.episodesCount} ép.`}{' '}
-                      · {activeHero.score}/10
+                        ? `À venir (${formatReleaseDateFr({
+                            nextAiringAt: activeHero.nextAiringAt,
+                            startDate: activeHero.startDate,
+                            seasonName: activeHero.seasonName,
+                            year: activeHero.year,
+                            isUpcoming: true,
+                          })})`
+                        : `${activeHero.episodesCount} ép.`}
+                      {typeof activeHero.score === 'number'
+                        ? ` · ${activeHero.score}/10`
+                        : ''}
                     </p>
 
                     <h1
@@ -398,10 +430,14 @@ export default function App() {
                         >
                           <Clock className="w-4 h-4 text-amber-400" />
                           <span>
-                            À venir
-                            {activeHero.nextAiringAt
-                              ? ` · ${formatAiringDateFr(activeHero.nextAiringAt)}`
-                              : ''}
+                            À venir ·{' '}
+                            {formatReleaseDateFr({
+                              nextAiringAt: activeHero.nextAiringAt,
+                              startDate: activeHero.startDate,
+                              seasonName: activeHero.seasonName,
+                              year: activeHero.year,
+                              isUpcoming: true,
+                            })}
                           </span>
                         </button>
                       )}
@@ -693,13 +729,22 @@ export default function App() {
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                         <span className="absolute bottom-3 left-3 text-xs font-mono tabular-nums text-zinc-200">
-                          {anime.score} / 10 ·{' '}
+                          {typeof anime.score === 'number'
+                            ? `${anime.score} / 10 · `
+                            : ''}
                           {anime.episodesCount === 0 || anime.status === 'À venir'
-                            ? 'À venir'
-                            : availableSeasons.length > 1
-                              ? `${availableSeasons.length} saisons · ${anime.episodesCount} ép.`
-                              : `${anime.episodesCount} ép.`}{' '}
-                          · {anime.year}
+                            ? `À venir · ${formatReleaseDateFr({
+                                nextAiringAt: anime.nextAiringAt,
+                                startDate: anime.startDate,
+                                seasonName: anime.seasonName,
+                                year: anime.year,
+                                isUpcoming: true,
+                              })}`
+                            : `${
+                                availableSeasons.length > 1
+                                  ? `${availableSeasons.length} saisons · `
+                                  : ''
+                              }${anime.episodesCount} ép.${anime.year ? ` · ${anime.year}` : ''}`}
                         </span>
                       </button>
 
@@ -1020,11 +1065,21 @@ export default function App() {
                       />
                       <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
                       <span className="absolute bottom-3 left-3 text-xs font-mono tabular-nums text-zinc-200">
-                        {anime.score} / 10 ·{' '}
+                        {typeof anime.score === 'number'
+                          ? `${anime.score} / 10 · `
+                          : ''}
                         {availableSeasons.length > 1
                           ? `${availableSeasons.length} saisons · `
                           : ''}
-                        {anime.year} · {anime.status}
+                        {anime.status === 'À venir'
+                          ? `À venir · ${formatReleaseDateFr({
+                              nextAiringAt: anime.nextAiringAt,
+                              startDate: anime.startDate,
+                              seasonName: anime.seasonName,
+                              year: anime.year,
+                              isUpcoming: true,
+                            })}`
+                          : `${anime.year ? `${anime.year} · ` : ''}${anime.status}`}
                       </span>
                     </button>
 

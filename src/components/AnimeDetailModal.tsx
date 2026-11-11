@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { Bookmark, Check, Clock, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import {
   formatAiringDateFr,
+  formatReleaseDateFr,
   formatRemainingMinutes,
   formatTimecode,
+  formatUpcomingNoticeFr,
   getSeriesSeasons,
   type AnimeSeries,
   type Episode,
@@ -209,11 +211,22 @@ export function AnimeDetailModal({
 
           <div className="relative z-10 flex flex-col justify-end min-h-[250px] sm:min-h-0 sm:h-full p-5 sm:p-8 pt-14">
             <p className="text-xs text-zinc-300 mb-1.5 line-clamp-1">
-              {seriesData.genres.join(' · ')} · {seriesData.year} ·{' '}
+              {seriesData.genres.join(' · ')}
+              {seriesData.year ? ` · ${seriesData.year}` : ''} ·{' '}
               {seriesData.studio} ·{' '}
-              {seasons.length > 1
-                ? `${seasons.length} saisons · ${seriesData.episodesCount} ép.`
-                : `${seriesData.episodesCount} ép.`}{' '}
+              {seriesData.episodesCount === 0 || seriesData.status === 'À venir'
+                ? formatReleaseDateFr({
+                    nextAiringAt: seriesData.nextAiringAt,
+                    startDate: seriesData.startDate,
+                    seasonName: seriesData.seasonName,
+                    year: seriesData.year,
+                    isUpcoming: true,
+                  })
+                : `${
+                    seasons.filter((s) => s.episodes.length > 0).length > 1
+                      ? `${seasons.filter((s) => s.episodes.length > 0).length} saisons · `
+                      : ''
+                  }${seriesData.episodesCount} ép.`}{' '}
               · {seriesData.audioTracks.join(' / ')}
             </p>
             <h2 className="text-xl sm:text-4xl font-display font-bold text-white tracking-tight mb-3.5 line-clamp-2">
@@ -247,10 +260,16 @@ export function AnimeDetailModal({
                 >
                   <Clock className="w-4 h-4 text-amber-400" />
                   <span>
-                    À venir
-                    {seriesData.nextAiringAt
-                      ? ` · ${formatAiringDateFr(seriesData.nextAiringAt)}`
-                      : ` · ${seriesData.year}`}
+                    À venir ·{' '}
+                    {formatReleaseDateFr({
+                      nextAiringAt:
+                        activeSeason?.nextAiringAt ?? seriesData.nextAiringAt,
+                      startDate: activeSeason?.startDate ?? seriesData.startDate,
+                      seasonName:
+                        activeSeason?.seasonName ?? seriesData.seasonName,
+                      year: activeSeason?.year ?? seriesData.year,
+                      isUpcoming: true,
+                    })}
                   </span>
                 </button>
               )}
@@ -298,12 +317,20 @@ export function AnimeDetailModal({
               <p>
                 <span className="text-zinc-500">Diffusion :</span>{' '}
                 <span className="text-zinc-200 tabular-nums">
-                  {seriesData.simulcastDay} à {seriesData.simulcastTime}
+                  {seriesData.simulcastDay && seriesData.simulcastTime
+                    ? `${seriesData.simulcastDay} à ${seriesData.simulcastTime}`
+                    : seriesData.status === 'Terminé'
+                      ? 'Série terminée'
+                      : 'Non programmée'}
                 </span>
               </p>
               <p>
                 <span className="text-zinc-500">Note AniList :</span>{' '}
-                <span className="text-zinc-200 tabular-nums">{seriesData.score} / 10</span>
+                <span className="text-zinc-200 tabular-nums">
+                  {typeof seriesData.score === 'number'
+                    ? `${seriesData.score} / 10`
+                    : 'Pas encore noté'}
+                </span>
               </p>
             </div>
           </div>
@@ -340,6 +367,13 @@ export function AnimeDetailModal({
                     season.seasonNumber === activeSeason?.seasonNumber;
 
                   if (isSeasonUpcoming) {
+                    const seasonReleaseLabel = formatReleaseDateFr({
+                      nextAiringAt: season.nextAiringAt,
+                      startDate: season.startDate,
+                      seasonName: season.seasonName,
+                      year: season.year,
+                      isUpcoming: true,
+                    });
                     return (
                       <button
                         key={season.id}
@@ -351,7 +385,9 @@ export function AnimeDetailModal({
                         <Clock className="w-3.5 h-3.5 text-amber-400/80" />
                         <span>
                           Saison {season.seasonNumber} · À venir
-                          {season.year ? ` (${season.year})` : ''}
+                          {seasonReleaseLabel !== 'Date à confirmer'
+                            ? ` (${seasonReleaseLabel})`
+                            : ''}
                         </span>
                       </button>
                     );
@@ -387,13 +423,24 @@ export function AnimeDetailModal({
                 <div className="py-10 px-4 text-center rounded-xl bg-white/3 border border-white/8">
                   <div className="inline-flex items-center gap-2 text-sm font-medium text-amber-300 mb-1.5">
                     <Clock className="w-4 h-4" />
-                    <span>Sortie à venir</span>
+                    <span>
+                      {activeSeason?.status === 'En cours'
+                        ? 'Épisodes indisponibles'
+                        : 'Sortie à venir'}
+                    </span>
                   </div>
                   <p className="text-xs sm:text-sm text-zinc-400">
-                    Aucun épisode n’est encore diffusé pour cet animé.
-                    {seriesData.nextAiringAt
-                      ? ` Premier épisode prévu le ${formatAiringDateFr(seriesData.nextAiringAt)}.`
-                      : ` Sortie prévue en ${seriesData.year}.`}
+                    {activeSeason?.status === 'En cours'
+                      ? 'Cette série est marquée en cours sur AniList, mais aucun épisode diffusé n’est encore répertorié.'
+                      : `Aucun épisode n’est encore diffusé pour cet animé. ${formatUpcomingNoticeFr({
+                          nextAiringAt:
+                            activeSeason?.nextAiringAt ?? seriesData.nextAiringAt,
+                          startDate:
+                            activeSeason?.startDate ?? seriesData.startDate,
+                          seasonName:
+                            activeSeason?.seasonName ?? seriesData.seasonName,
+                          year: activeSeason?.year ?? seriesData.year,
+                        })}`}
                   </p>
                 </div>
               ) : null}

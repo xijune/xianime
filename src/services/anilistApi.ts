@@ -3,9 +3,11 @@ import {
   GENRE_MAP_FR,
   GENRE_TO_ANILIST,
   type AnimeSeason,
+  type AnimeSeasonName,
   type AnimeSeries,
   type Episode,
   type ParticleTheme,
+  type ReleaseFuzzyDate,
   type SimulcastDay,
   type SimulcastScheduleItem,
 } from '../data/animeCatalog';
@@ -54,6 +56,7 @@ interface AniListMediaRaw {
   description?: string | null;
   genres?: string[] | null;
   averageScore?: number | null;
+  season?: AnimeSeasonName | null;
   seasonYear?: number | null;
   startDate?: AniListFuzzyDate | null;
   status?: 'RELEASING' | 'FINISHED' | 'NOT_YET_RELEASED' | 'CANCELLED' | string | null;
@@ -124,11 +127,11 @@ function pickParticleTheme(genres: string[]): ParticleTheme {
 }
 
 function getDayAndTimeFromUnix(unixSeconds?: number | null): {
-  day: SimulcastDay;
-  time: string;
+  day?: SimulcastDay;
+  time?: string;
 } {
   if (!unixSeconds) {
-    return { day: 'Samedi', time: '18:30' };
+    return { day: undefined, time: undefined };
   }
   const d = new Date(unixSeconds * 1000);
   const day = DAYS_FR[d.getDay()] ?? 'Samedi';
@@ -214,11 +217,30 @@ function getRelatedSeasonEdges(raw: AniListMediaRaw): Array<{
 }
 
 function mapAniListStatus(
-  status?: string | null
+  raw: AniListMediaRaw
 ): 'En cours' | 'Terminé' | 'À venir' {
-  if (status === 'RELEASING') return 'En cours';
-  if (status === 'NOT_YET_RELEASED' || status === 'CANCELLED') return 'À venir';
+  if (raw.status === 'NOT_YET_RELEASED' || raw.status === 'CANCELLED') {
+    return 'À venir';
+  }
+  if (raw.status === 'RELEASING') {
+    if (
+      raw.nextAiringEpisode?.episode === 1 &&
+      raw.nextAiringEpisode.airingAt * 1000 > Date.now()
+    ) {
+      return 'À venir';
+    }
+    return 'En cours';
+  }
   return 'Terminé';
+}
+
+function toReleaseFuzzyDate(d?: AniListFuzzyDate | null): ReleaseFuzzyDate | undefined {
+  if (!d) return undefined;
+  const year = d.year ?? undefined;
+  const month = d.month ?? undefined;
+  const day = d.day ?? undefined;
+  if (!year && !month && !day) return undefined;
+  return { year, month, day };
 }
 
 function getReleasedEpisodesCount(raw: AniListMediaRaw): number {
@@ -248,18 +270,20 @@ function buildSeasonFromMedia(
   seasonNumber: number,
   m: AniListMediaRaw,
   fallbackTitle: string,
-  fallbackYear: number,
+  fallbackYear: number | undefined,
   fallbackPoster: string,
   fallbackVisual: string,
   fallbackSlug?: string
 ): AnimeSeason {
   const mTitle = getMediaDisplayTitle(m);
-  const seasonStatus = mapAniListStatus(m.status);
+  const seasonStatus = mapAniListStatus(m);
   const releasedCount = getReleasedEpisodesCount(m);
   const durMin = m.duration || 24;
   const poster =
     m.coverImage?.extraLarge || m.coverImage?.large || fallbackPoster;
   const thumb = m.bannerImage || poster || fallbackVisual;
+  const startDate = toReleaseFuzzyDate(m.startDate);
+  const year = m.seasonYear || m.startDate?.year || undefined;
 
   const eps = buildEpisodesForAnime(
     rootSeriesId,
@@ -281,7 +305,9 @@ function buildSeasonFromMedia(
       seasonNumber === 1 && mTitle === fallbackTitle
         ? 'Saison 1'
         : formatSeasonTitle(seasonNumber, mTitle, fallbackTitle),
-    year: m.seasonYear || m.startDate?.year || fallbackYear,
+    year,
+    startDate,
+    seasonName: m.season ?? undefined,
     status: seasonStatus,
     episodesCount: eps.length,
     nextAiringEpisode:
@@ -302,9 +328,12 @@ function mapAniListMedia(raw: AniListMediaRaw, featured = false): AnimeSeries {
     .slice(0, 3)
     .map((g) => GENRE_MAP_FR[g] ?? g);
   const studio = raw.studios?.nodes?.[0]?.name || 'Studio d’animation';
-  const year = raw.seasonYear || raw.startDate?.year || 2025;
-  const score = raw.averageScore ? Number((raw.averageScore / 10).toFixed(1)) : 8.5;
-  const status = mapAniListStatus(raw.status);
+  const startDate = toReleaseFuzzyDate(raw.startDate);
+  const year = raw.seasonYear || raw.startDate?.year || undefined;
+  const score = raw.averageScore
+    ? Number((raw.averageScore / 10).toFixed(1))
+    : undefined;
+  const status = mapAniListStatus(raw);
 
   const { day, time } = getDayAndTimeFromUnix(raw.nextAiringEpisode?.airingAt);
   const posterImage =
@@ -335,6 +364,8 @@ function mapAniListMedia(raw: AniListMediaRaw, featured = false): AnimeSeries {
     genres,
     studio,
     year,
+    startDate,
+    seasonName: raw.season ?? undefined,
     rating: raw.isAdult ? '18+' : '14+',
     score,
     status,
@@ -342,7 +373,7 @@ function mapAniListMedia(raw: AniListMediaRaw, featured = false): AnimeSeries {
     simulcastTime: time,
     nextAiringEpisode: initialSeason.nextAiringEpisode,
     nextAiringAt: initialSeason.nextAiringAt,
-    audioTracks: score >= 8.4 ? ['VOSTFR', 'VF'] : ['VOSTFR'],
+    audioTracks: score && score >= 8.4 ? ['VOSTFR', 'VF'] : ['VOSTFR'],
     episodesCount: initialSeason.episodesCount,
     synopsis: stripHtml(raw.description),
     keyVisual,
@@ -446,15 +477,22 @@ function groupFranchiseCatalog(
         )
       );
       const totalAvailable = seasons.reduce((acc, s) => acc + s.episodes.length, 0);
+      const ongoingSeason = seasons.find((s) => s.status === 'En cours');
       rootSeries.seasons = seasons;
       rootSeries.episodes = seasons[0].episodes;
       rootSeries.episodesCount = totalAvailable;
-      rootSeries.status =
-        totalAvailable === 0
+      rootSeries.status = ongoingSeason
+        ? 'En cours'
+        : seasons.every((s) => s.status === 'À venir')
           ? 'À venir'
-          : seasons.some((s) => s.status === 'En cours')
-            ? 'En cours'
-            : 'Terminé';
+          : 'Terminé';
+      if (ongoingSeason?.nextAiringAt) {
+        const sched = getDayAndTimeFromUnix(ongoingSeason.nextAiringAt);
+        rootSeries.simulcastDay = sched.day;
+        rootSeries.simulcastTime = sched.time;
+        rootSeries.nextAiringAt = ongoingSeason.nextAiringAt;
+        rootSeries.nextAiringEpisode = ongoingSeason.nextAiringEpisode;
+      }
     }
 
     groupedSeries.push(rootSeries);
@@ -475,6 +513,7 @@ const MEDIA_FRAGMENT = `
   description(asHtml: false)
   genres
   averageScore
+  season
   seasonYear
   startDate {
     year
@@ -642,17 +681,25 @@ export async function fetchAllSeasonsForAnime(anime: AnimeSeries): Promise<Anime
     );
 
     const totalAvailable = seasons.reduce((sum, s) => sum + s.episodes.length, 0);
+    const ongoingSeason = seasons.find((s) => s.status === 'En cours');
+    const ongoingSched = ongoingSeason?.nextAiringAt
+      ? getDayAndTimeFromUnix(ongoingSeason.nextAiringAt)
+      : undefined;
     const fullSeries: AnimeSeries = {
       ...baseSeries,
       id: rootId,
       episodes: seasons[0].episodes,
       episodesCount: totalAvailable,
-      status:
-        totalAvailable === 0
+      status: ongoingSeason
+        ? 'En cours'
+        : seasons.every((s) => s.status === 'À venir')
           ? 'À venir'
-          : seasons.some((s) => s.status === 'En cours')
-            ? 'En cours'
-            : 'Terminé',
+          : 'Terminé',
+      simulcastDay: ongoingSched?.day ?? baseSeries.simulcastDay,
+      simulcastTime: ongoingSched?.time ?? baseSeries.simulcastTime,
+      nextAiringAt: ongoingSeason?.nextAiringAt ?? baseSeries.nextAiringAt,
+      nextAiringEpisode:
+        ongoingSeason?.nextAiringEpisode ?? baseSeries.nextAiringEpisode,
       seasons,
     };
 
@@ -780,8 +827,8 @@ export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
       id: `sched-${row.id}`,
       anime,
       episodeNumber: row.episode,
-      day,
-      time,
+      day: day ?? 'Samedi',
+      time: time ?? '18:30',
       airingAt: row.airingAt,
     });
   }

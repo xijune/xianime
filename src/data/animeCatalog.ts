@@ -51,6 +51,14 @@ export interface Episode {
   cues: SubtitleCue[];
 }
 
+export type AnimeSeasonName = 'WINTER' | 'SPRING' | 'SUMMER' | 'FALL';
+
+export interface ReleaseFuzzyDate {
+  year?: number;
+  month?: number;
+  day?: number;
+}
+
 export interface AnimeSeason {
   id: string;
   seasonNumber: number;
@@ -59,6 +67,8 @@ export interface AnimeSeason {
   slug?: string;
   title: string;
   year?: number;
+  startDate?: ReleaseFuzzyDate;
+  seasonName?: AnimeSeasonName;
   status?: 'En cours' | 'Terminé' | 'À venir';
   episodesCount: number;
   nextAiringEpisode?: number;
@@ -77,12 +87,14 @@ export interface AnimeSeries {
   originalTitle: string;
   genres: string[];
   studio: string;
-  year: number;
+  year?: number;
+  startDate?: ReleaseFuzzyDate;
+  seasonName?: AnimeSeasonName;
   rating: string;
-  score: number;
+  score?: number;
   status: 'En cours' | 'Terminé' | 'À venir';
-  simulcastDay: SimulcastDay;
-  simulcastTime: string;
+  simulcastDay?: SimulcastDay;
+  simulcastTime?: string;
   nextAiringEpisode?: number;
   nextAiringAt?: number;
   audioTracks: AudioTrack[];
@@ -111,6 +123,8 @@ export function getSeriesSeasons(anime: AnimeSeries): AnimeSeason[] {
       slug: anime.slug,
       title: 'Saison 1',
       year: anime.year,
+      startDate: anime.startDate,
+      seasonName: anime.seasonName,
       status: anime.status,
       episodesCount: anime.episodes.filter((e) => !e.isUpcoming).length,
       nextAiringEpisode: anime.nextAiringEpisode,
@@ -132,13 +146,116 @@ export function getAllSeriesEpisodes(anime: AnimeSeries): Episode[] {
 export function formatAiringDateFr(unixSeconds?: number): string {
   if (!unixSeconds) return 'Date à confirmer';
   const date = new Date(unixSeconds * 1000);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
   return date.toLocaleDateString('fr-FR', {
     weekday: 'short',
     day: 'numeric',
     month: 'short',
+    ...(sameYear ? {} : { year: 'numeric' }),
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+const SEASON_LABELS_FR: Record<AnimeSeasonName, string> = {
+  WINTER: 'Hiver',
+  SPRING: 'Printemps',
+  SUMMER: 'Été',
+  FALL: 'Automne',
+};
+
+const SEASON_END_MONTH: Record<AnimeSeasonName, number> = {
+  WINTER: 3,
+  SPRING: 6,
+  SUMMER: 9,
+  FALL: 12,
+};
+
+export function formatReleaseDateFr(info: {
+  nextAiringAt?: number;
+  startDate?: ReleaseFuzzyDate;
+  seasonName?: AnimeSeasonName;
+  year?: number;
+  isUpcoming?: boolean;
+}): string {
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+
+  if (info.nextAiringAt && info.nextAiringAt * 1000 > Date.now()) {
+    return formatAiringDateFr(info.nextAiringAt);
+  }
+
+  const sd = info.startDate;
+  if (sd?.year && sd.month && sd.day) {
+    const targetEnd = new Date(sd.year, sd.month - 1, sd.day, 23, 59, 59);
+    if (info.isUpcoming && targetEnd.getTime() < Date.now()) {
+      return 'Date à confirmer';
+    }
+    return new Date(sd.year, sd.month - 1, sd.day).toLocaleDateString('fr-FR', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
+  }
+
+  if (sd?.year && sd.month) {
+    if (
+      info.isUpcoming &&
+      (sd.year < currentYear ||
+        (sd.year === currentYear && sd.month < currentMonth))
+    ) {
+      return 'Date à confirmer';
+    }
+    return new Date(sd.year, sd.month - 1, 1).toLocaleDateString('fr-FR', {
+      month: 'long',
+      year: 'numeric',
+    });
+  }
+
+  const y = info.year ?? sd?.year;
+  if (info.seasonName && y) {
+    if (
+      info.isUpcoming &&
+      (y < currentYear ||
+        (y === currentYear && SEASON_END_MONTH[info.seasonName] < currentMonth))
+    ) {
+      return 'Date à confirmer';
+    }
+    return `${SEASON_LABELS_FR[info.seasonName]} ${y}`;
+  }
+
+  if (y) {
+    if (info.isUpcoming && y < currentYear) {
+      return 'Date à confirmer';
+    }
+    return String(y);
+  }
+
+  return 'Date à confirmer';
+}
+
+export function formatUpcomingNoticeFr(info: {
+  nextAiringAt?: number;
+  startDate?: ReleaseFuzzyDate;
+  seasonName?: AnimeSeasonName;
+  year?: number;
+}): string {
+  if (info.nextAiringAt && info.nextAiringAt * 1000 > Date.now()) {
+    return `Premier épisode prévu le ${formatAiringDateFr(info.nextAiringAt)}.`;
+  }
+  const label = formatReleaseDateFr({ ...info, isUpcoming: true });
+  if (label === 'Date à confirmer') {
+    return 'Date de sortie officielle à confirmer.';
+  }
+  const sd = info.startDate;
+  if (sd?.year && sd.month && sd.day) {
+    return `Sortie prévue le ${label}.`;
+  }
+  if ((sd?.year && sd.month) || /^\d{4}$/.test(label)) {
+    return `Sortie prévue en ${label}.`;
+  }
+  return `Sortie prévue : ${label}.`;
 }
 
 export interface SimulcastScheduleItem {

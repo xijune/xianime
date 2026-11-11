@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Clock, Loader2, Play, Search, X } from 'lucide-react';
-import { getSeriesSeasons, type AnimeSeries } from '../data/animeCatalog';
+import {
+  formatReleaseDateFr,
+  getSeriesSeasons,
+  type AnimeSeries,
+} from '../data/animeCatalog';
 import { searchRealAnime } from '../services/anilistApi';
 import { ArtworkImage } from './ArtworkImage';
 
@@ -149,11 +153,19 @@ export function SearchModal({
                     <p className="text-xs text-zinc-400 mt-0.5 truncate">
                       {anime.genres.join(' · ')} · {anime.studio} ·{' '}
                       {isUpcoming
-                        ? `À venir (${anime.year})`
+                        ? `À venir (${formatReleaseDateFr({
+                            nextAiringAt: anime.nextAiringAt,
+                            startDate: anime.startDate,
+                            seasonName: anime.seasonName,
+                            year: anime.year,
+                            isUpcoming: true,
+                          })})`
                         : availableSeasons.length > 1
                           ? `${availableSeasons.length} saisons · ${anime.episodesCount} ép.`
-                          : `${anime.episodesCount} ép.`}{' '}
-                      · {anime.score}/10
+                          : `${anime.episodesCount} ép.`}
+                      {typeof anime.score === 'number'
+                        ? ` · ${anime.score}/10`
+                        : ''}
                     </p>
                   </div>
                   {isUpcoming ? (
