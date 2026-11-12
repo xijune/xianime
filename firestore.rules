@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidProfile(data) {
+      return data.keys().hasAll(['name', 'avatar', 'color', 'defaultAudio']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 50 &&
+        data.avatar is string && data.avatar.size() <= 60 &&
+        data.color is string && data.color.size() <= 20 &&
+        (data.defaultAudio == 'VOSTFR' || data.defaultAudio == 'VF');
+    }
+
+    function isValidWatchlist(data) {
+      return data.keys().hasAll(['animeId', 'title']) &&
+        data.animeId is string && data.animeId.size() <= 100 &&
+        data.title is string && data.title.size() <= 200;
+    }
+
+    function isValidProgress(data) {
+      return data.keys().hasAll(['animeId', 'episodeId', 'currentTime', 'duration', 'completed']) &&
+        data.animeId is string && data.animeId.size() <= 100 &&
+        data.episodeId is string && data.episodeId.size() <= 150 &&
+        data.currentTime is number && data.duration is number &&
+        data.completed is bool;
+    }
+
+    // Per-user profiles — same Google account = same profiles on every device
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /profiles/{profileId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(profileId) && isValidProfile(incoming());
+        allow update: if isOwner(userId) && isValidProfile(incoming()) &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'avatar', 'color', 'defaultAudio', 'isKid', 'updatedAt']);
+        allow delete: if isOwner(userId);
+
+        match /watchlist/{animeId} {
+          allow get, list: if isOwner(userId);
+          allow create: if isOwner(userId) && isValidId(animeId) && isValidWatchlist(incoming());
+          allow update: if isOwner(userId) && isValidWatchlist(incoming());
+          allow delete: if isOwner(userId);
+        }
+
+        match /progress/{episodeId} {
+          allow get, list: if isOwner(userId);
+          allow create: if isOwner(userId) && isValidId(episodeId) && isValidProgress(incoming());
+          allow update: if isOwner(userId) && isValidProgress(incoming());
+          allow delete: if isOwner(userId);
+        }
+      }
+    }
+
+    // Connection probe used by the client
+    match /test/{docId} {
+      allow get: if isSignedIn();
+    }
+  }
+}
