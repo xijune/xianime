@@ -4,6 +4,8 @@ import {
   db,
   signInAnonymously,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut,
   googleProvider,
   onAuthStateChanged,
@@ -16,12 +18,19 @@ import {
   OperationType,
   type User,
 } from '../services/firebase';
-import { linkWithPopup } from 'firebase/auth';
 import type { UserProfile } from '../types/profile';
 
 const PROFILES_STORAGE_KEY = 'kurostream_profiles_cache_v2';
 const ACTIVE_PROFILE_STORAGE_KEY = 'kurostream_active_profile_id_v2';
 const SESSION_PROFILE_CHOSEN_KEY = 'kurostream_session_profile_chosen_v1';
+const LAST_AUTH_UID_KEY = 'kurostream_last_auth_uid_v1';
+
+function profilesCacheKey(uid: string | null | undefined) {
+  return uid ? `${PROFILES_STORAGE_KEY}:${uid}` : PROFILES_STORAGE_KEY;
+}
+function activeProfileCacheKey(uid: string | null | undefined) {
+  return uid ? `${ACTIVE_PROFILE_STORAGE_KEY}:${uid}` : ACTIVE_PROFILE_STORAGE_KEY;
+}
 
 const DEFAULT_PROFILE: UserProfile = {
   id: 'profile-main',
@@ -35,6 +44,14 @@ const DEFAULT_PROFILE: UserProfile = {
 };
 
 /** Firestore path root for a user's profiles */
+
+/** Redirect only on mobile — popup works on desktop even via Tailscale IP. */
+function preferRedirectSignIn(): boolean {
+  if (typeof window === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+}
+
 export function userProfilesPath(uid: string) {
   return `users/${uid}/profiles`;
 }
@@ -83,9 +100,36 @@ export function useProfiles() {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (unmounted) return;
       if (user) {
+        // Si le compte change (invité → Google ou autre UID), vider le cache local
+        // pour ne pas afficher les profils d'un autre utilisateur.
+        try {
+          const prevUid = localStorage.getItem(LAST_AUTH_UID_KEY);
+          if (prevUid && prevUid !== user.uid) {
+            setHasSelectedSessionProfile(false);
+            sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
+            const cached = localStorage.getItem(profilesCacheKey(user.uid));
+            if (cached) {
+              const parsed = JSON.parse(cached) as UserProfile[];
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                setProfiles(parsed);
+              } else {
+                setProfiles([DEFAULT_PROFILE]);
+              }
+            } else {
+              setProfiles([DEFAULT_PROFILE]);
+            }
+            const savedActive = localStorage.getItem(activeProfileCacheKey(user.uid));
+            setActiveProfileId(savedActive || DEFAULT_PROFILE.id);
+          }
+          localStorage.setItem(LAST_AUTH_UID_KEY, user.uid);
+        } catch {
+          // Ignore
+        }
         setCurrentUser(user);
         setAuthLoading(false);
       } else {
+        // Anonymous is optional (often disabled in Firebase = auth/admin-restricted-operation).
+        // App works without it; user can still sign in with Google.
         signInAnonymously(auth)
           .then((res) => {
             if (!unmounted) {
@@ -95,7 +139,8 @@ export function useProfiles() {
           })
           .catch((err) => {
             if (!unmounted) {
-              console.warn('Anonymous auth failed:', err);
+              console.warn('Anonymous auth unavailable (use Google to sync profiles):', err);
+              setCurrentUser(null);
               setAuthLoading(false);
             }
           });
@@ -119,8 +164,10 @@ export function useProfiles() {
       colRef,
       (snapshot) => {
         if (snapshot.empty) {
-          const baseProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
-          baseProfiles.forEach((p) => {
+          // Ne jamais pousser le cache local d'un autre appareil / invité.
+          // Un compte Google vide démarre uniquement avec le profil par défaut.
+          const seed = [DEFAULT_PROFILE];
+          seed.forEach((p) => {
             void setDoc(doc(db, colPath, p.id), {
               name: p.name,
               avatar: p.avatar,
@@ -155,7 +202,11 @@ export function useProfiles() {
         setProfiles(remoteProfiles);
 
         try {
-          localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(remoteProfiles));
+          localStorage.setItem(
+            profilesCacheKey(currentUser.uid),
+            JSON.stringify(remoteProfiles)
+          );
+          localStorage.setItem(LAST_AUTH_UID_KEY, currentUser.uid);
         } catch {
           // Ignore
         }
@@ -176,11 +227,12 @@ export function useProfiles() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(ACTIVE_PROFILE_STORAGE_KEY, activeProfileId);
+      const uid = currentUser?.uid;
+      localStorage.setItem(activeProfileCacheKey(uid), activeProfileId);
     } catch {
       // Ignore
     }
-  }, [activeProfileId]);
+  }, [activeProfileId, currentUser?.uid]);
 
   const activeProfile =
     profiles.find((p) => p.id === activeProfileId) ?? profiles[0] ?? DEFAULT_PROFILE;
@@ -218,7 +270,10 @@ export function useProfiles() {
       setProfiles((prev) => {
         const next = [...prev, newProf];
         try {
-          localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(next));
+          localStorage.setItem(
+            profilesCacheKey(currentUser?.uid),
+            JSON.stringify(next)
+          );
         } catch {
           // Ignore
         }
@@ -274,7 +329,10 @@ export function useProfiles() {
           return p;
         });
         try {
-          localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(next));
+          localStorage.setItem(
+            profilesCacheKey(currentUser?.uid),
+            JSON.stringify(next)
+          );
         } catch {
           // Ignore
         }
@@ -332,7 +390,10 @@ export function useProfiles() {
       const remaining = profiles.filter((p) => p.id !== profileId);
       setProfiles(remaining);
       try {
-        localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(remaining));
+        localStorage.setItem(
+          profilesCacheKey(currentUser?.uid),
+          JSON.stringify(remaining)
+        );
       } catch {
         // Ignore
       }
@@ -357,30 +418,111 @@ export function useProfiles() {
    * Connexion Google : le même compte (et ses profils) sur tous les appareils.
    * Si session anonyme, tente d'abord un link pour conserver les données.
    */
+  // Complete redirect-based Google sign-in when returning from Google (iPhone / mobile)
+  useEffect(() => {
+    let cancelled = false;
+    let pending = false;
+    try {
+      pending = sessionStorage.getItem('kurostream_google_redirect_pending') === '1';
+    } catch {
+      // Ignore
+    }
+    if (pending) {
+      setAuthBusy(true);
+    }
+    getRedirectResult(auth)
+      .then((result) => {
+        if (cancelled) return;
+        try {
+          sessionStorage.removeItem('kurostream_google_redirect_pending');
+        } catch {
+          // Ignore
+        }
+        if (!result?.user) {
+          if (pending) {
+            // Redirect came back without a user — usually unauthorized-domain or blocked storage
+            console.warn('[auth] Redirect returned without user');
+            setAuthError(
+              "Connexion Google interrompue sur mobile. Vérifie que 100.122.236.5 est dans Firebase → Authentication → Authorized domains, puis réessaie dans Safari (pas un navigateur intégré)."
+            );
+          }
+          setAuthBusy(false);
+          return;
+        }
+        console.log('[auth] Google redirect OK', {
+          uid: result.user.uid,
+          email: result.user.email,
+        });
+        setCurrentUser(result.user);
+        setHasSelectedSessionProfile(false);
+        try {
+          sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
+        } catch {
+          // Ignore
+        }
+        setAuthBusy(false);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        try {
+          sessionStorage.removeItem('kurostream_google_redirect_pending');
+        } catch {
+          // Ignore
+        }
+        console.warn('[auth] Google redirect result failed:', err);
+        const code =
+          err && typeof err === 'object' && 'code' in err
+            ? String((err as { code: string }).code)
+            : '';
+        let message =
+          err instanceof Error ? err.message : 'Connexion Google impossible';
+        if (code === 'auth/unauthorized-domain') {
+          message =
+            'Domaine non autorisé. Ajoute 100.122.236.5 dans Firebase → Authentication → Authorized domains.';
+        } else if (code === 'auth/operation-not-allowed') {
+          message = 'Google Sign-In n’est pas activé dans Firebase Authentication.';
+        }
+        setAuthError(message);
+        setAuthBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /**
+   * Connexion Google : toujours un vrai sign-in (jamais link de l'anonyme).
+   * Ainsi PC et téléphone partagent le même UID Firebase = les mêmes profils.
+   */
   const signInWithGoogle = useCallback(async () => {
     setAuthBusy(true);
     setAuthError(null);
+    const useRedirect = preferRedirectSignIn();
+    console.log('[auth] Google sign-in start', {
+      useRedirect,
+      host: typeof window !== 'undefined' ? window.location.host : '',
+      currentUid: auth.currentUser?.uid ?? null,
+    });
     try {
-      const user = auth.currentUser;
-      if (user && user.isAnonymous) {
+      // Never link anonymous — same Google UID on every device.
+      if (useRedirect) {
         try {
-          await linkWithPopup(user, googleProvider);
-          return;
-        } catch (linkErr: unknown) {
-          const code =
-            linkErr && typeof linkErr === 'object' && 'code' in linkErr
-              ? String((linkErr as { code: string }).code)
-              : '';
-          if (
-            code !== 'auth/credential-already-in-use' &&
-            code !== 'auth/email-already-in-use' &&
-            code !== 'auth/provider-already-linked'
-          ) {
-            throw linkErr;
-          }
+          sessionStorage.setItem('kurostream_google_redirect_pending', '1');
+        } catch {
+          // Ignore
         }
+        console.log('[auth] Starting Google redirect…');
+        await signInWithRedirect(auth, googleProvider);
+        // Page navigates away; busy stays true
+        return;
       }
-      await signInWithPopup(auth, googleProvider);
+      const cred = await signInWithPopup(auth, googleProvider);
+      console.log('[auth] Google popup OK', {
+        uid: cred.user.uid,
+        email: cred.user.email,
+      });
+      // Update UI immediately (don't wait only for onAuthStateChanged)
+      setCurrentUser(cred.user);
       setHasSelectedSessionProfile(false);
       try {
         sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
@@ -388,9 +530,21 @@ export function useProfiles() {
         // Ignore
       }
     } catch (err) {
-      const message =
+      let message =
         err instanceof Error ? err.message : 'Connexion Google impossible';
-      console.warn('Google sign-in failed:', err);
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code: string }).code)
+          : '';
+      if (code === 'auth/unauthorized-domain') {
+        message =
+          'Domaine non autorisé dans Firebase. Ajoute 100.122.236.5 (ou ton hostname Tailscale) dans Authentication → Authorized domains.';
+      } else if (code === 'auth/popup-blocked' || code === 'auth/popup-closed-by-user') {
+        message = 'Popup Google bloquée ou fermée. Réessaie, ou autorise les popups.';
+      } else if (code === 'auth/operation-not-allowed') {
+        message = 'Le fournisseur Google n’est pas activé dans Firebase Authentication.';
+      }
+      console.warn('Google sign-in failed:', code, err);
       setAuthError(message);
       throw err;
     } finally {
@@ -402,16 +556,19 @@ export function useProfiles() {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      await signOut(auth);
+      // Drop currentUser first so Firestore listeners unsubscribe before auth is gone
+      setCurrentUser(null);
+      setProfiles([DEFAULT_PROFILE]);
+      setActiveProfileId(DEFAULT_PROFILE.id);
       setHasSelectedSessionProfile(false);
       try {
         sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
         localStorage.removeItem(PROFILES_STORAGE_KEY);
+        localStorage.removeItem(LAST_AUTH_UID_KEY);
       } catch {
         // Ignore
       }
-      setProfiles([DEFAULT_PROFILE]);
-      setActiveProfileId(DEFAULT_PROFILE.id);
+      await signOut(auth);
     } catch (err) {
       console.warn('Sign-out failed:', err);
       setAuthError(err instanceof Error ? err.message : 'Déconnexion impossible');
@@ -420,12 +577,9 @@ export function useProfiles() {
     }
   }, []);
 
-  const isAnonymous = Boolean(currentUser?.isAnonymous);
-  const isGoogleUser = Boolean(
-    currentUser &&
-      !currentUser.isAnonymous &&
-      currentUser.providerData?.some((p) => p.providerId === 'google.com')
-  );
+  const isAnonymous = Boolean(!currentUser || currentUser.isAnonymous);
+  // Signed-in non-anonymous user = cloud account (Google, etc.)
+  const isGoogleUser = Boolean(currentUser && !currentUser.isAnonymous);
 
   return {
     currentUser,

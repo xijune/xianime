@@ -17,6 +17,16 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Allow Tailscale Serve / MagicDNS hosts (*.ts.net) and LAN IPs
+      allowedHosts: true,
+      // Proxy AniList to avoid CORS when opening the app via Tailscale IP / non-localhost
+      proxy: {
+        '/api/anilist': {
+          target: 'https://graphql.anilist.co',
+          changeOrigin: true,
+          rewrite: (p: string) => p.replace(/^\/api\/anilist/, '') || '/',
+        },
+      },
     },
   };
 });

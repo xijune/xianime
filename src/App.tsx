@@ -1885,6 +1885,7 @@ export default function App() {
           onClose={() => setProfileSelectOpen(false)}
           isGoogleUser={isGoogleUser}
           accountLabel={currentUser?.email ?? currentUser?.displayName ?? null}
+          accountUid={currentUser?.uid ?? null}
           authBusy={authBusy}
           authError={authError}
           onSignInWithGoogle={signInWithGoogle}

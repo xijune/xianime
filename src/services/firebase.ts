@@ -3,6 +3,9 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  linkWithRedirect,
   signInAnonymously,
   signOut,
   onAuthStateChanged,
@@ -25,7 +28,14 @@ import firebaseConfig from '../../firebase-applet-config.json';
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 
 export const auth = getAuth(app);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+
+const firestoreDbId = (firebaseConfig as { firestoreDatabaseId?: string })
+  .firestoreDatabaseId;
+export const db =
+  !firestoreDbId || firestoreDbId === '(default)'
+    ? getFirestore(app)
+    : getFirestore(app, firestoreDbId);
+
 export const googleProvider = new GoogleAuthProvider();
 
 export enum OperationType {
@@ -54,13 +64,29 @@ export interface FirestoreErrorInfo {
   };
 }
 
+function firestoreErrorCode(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error) {
+    return String((error as { code: string }).code);
+  }
+  return '';
+}
+
+/** permission-denied after sign-out is expected — log only, do not crash the app */
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): never {
+): void {
+  const code = firestoreErrorCode(error);
+  const message = error instanceof Error ? error.message : String(error);
+  const soft =
+    code === 'permission-denied' ||
+    code === 'unauthenticated' ||
+    message.toLowerCase().includes('insufficient permissions') ||
+    message.toLowerCase().includes('missing or insufficient permissions');
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: message,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -76,11 +102,16 @@ export function handleFirestoreError(
     operationType,
     path,
   };
+
+  if (soft) {
+    console.warn('Firestore (ignored): ', JSON.stringify(errInfo));
+    return;
+  }
+
   console.error('Firestore Error: ', JSON.stringify(errInfo));
   throw new Error(JSON.stringify(errInfo));
 }
 
-// Connection test on boot as required by skill
 async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
@@ -97,6 +128,9 @@ void testConnection();
 
 export {
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  linkWithRedirect,
   signInAnonymously,
   signOut,
   onAuthStateChanged,

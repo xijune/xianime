@@ -22,6 +22,7 @@ interface ProfileSelectModalProps {
   /** Compte Google connecté → mêmes profils sur tous les appareils */
   isGoogleUser?: boolean;
   accountLabel?: string | null;
+  accountUid?: string | null;
   authBusy?: boolean;
   authError?: string | null;
   onSignInWithGoogle?: () => Promise<void>;
@@ -39,6 +40,7 @@ export function ProfileSelectModal({
   onClose,
   isGoogleUser = false,
   accountLabel = null,
+  accountUid = null,
   authBusy = false,
   authError = null,
   onSignInWithGoogle,
@@ -92,6 +94,11 @@ export function ProfileSelectModal({
                   <p className="text-sm text-white truncate">
                     {accountLabel || 'Google'}
                   </p>
+                  {accountUid ? (
+                    <p className="text-[10px] text-zinc-500 font-mono truncate" title={accountUid}>
+                      uid: {accountUid.slice(0, 8)}…
+                    </p>
+                  ) : null}
                 </div>
                 {onSignOut ? (
                   <button
@@ -146,7 +153,9 @@ export function ProfileSelectModal({
             </>
           )}
           {authError ? (
-            <p className="text-[11px] text-amber-300/90 leading-relaxed">{authError}</p>
+            <p className="text-xs text-amber-300 leading-relaxed bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+              {authError}
+            </p>
           ) : null}
         </div>
 

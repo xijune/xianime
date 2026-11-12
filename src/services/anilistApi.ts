@@ -15,7 +15,13 @@ import {
   type SimulcastScheduleItem,
 } from '../data/animeCatalog';
 
-const ANILIST_ENDPOINT = 'https://graphql.anilist.co';
+/** Use Vite proxy in the browser so Tailscale / LAN origins don't hit AniList CORS + see 429 as CORS. */
+function getAniListEndpoint(): string {
+  if (typeof window === 'undefined') return 'https://graphql.anilist.co';
+  // Always proxy from the browser during local dev (localhost + Tailscale IP)
+  if (import.meta.env.DEV) return '/api/anilist';
+  return 'https://graphql.anilist.co';
+}
 const JIKAN_ENDPOINT = 'https://api.jikan.moe/v4';
 
 const TV_SEASON_FORMATS = new Set(['TV', 'TV_SHORT', 'ONA']);
@@ -768,7 +774,7 @@ const MEDIA_FRAGMENT = `
 `;
 
 async function queryAniList<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const res = await fetch(ANILIST_ENDPOINT, {
+  const res = await fetch(getAniListEndpoint(), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
