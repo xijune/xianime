@@ -2,6 +2,7 @@ import {
   buildEpisodesForAnime,
   computeRealisticEpisodeDuration,
   estimateEpisodeAirDate,
+  getLatestReleasedEpisodeAirTime,
   GENRE_MAP_FR,
   GENRE_TO_ANILIST,
   type AnimeSeason,
@@ -1071,22 +1072,80 @@ export async function fetchCatalogPage(options: {
   const page = options.page ?? 1;
   const perPage = options.perPage ?? 24;
 
-  const query = `
-    query SearchAnime($search: String, $genre: String, $sort: [MediaSort], $page: Int, $perPage: Int) {
-      Page(page: $page, perPage: $perPage) {
-        pageInfo {
-          total
-          currentPage
-          lastPage
-          hasNextPage
-          perPage
-        }
-        media(type: ANIME, search: $search, genre: $genre, sort: $sort, isAdult: false) {
-          ${MEDIA_FRAGMENT}
+  const now = new Date();
+  const todayFuzzy = now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate();
+
+  // For "Récents", query strictly anime that are currently releasing or already finished
+  // and whose broadcast began on or before today, sorted by [START_DATE_DESC]
+  const isRecentSort = sort === 'START_DATE_DESC';
+  const isScoreSort = sort === 'SCORE_DESC';
+
+  const query = isRecentSort
+    ? `
+      query SearchAnimeRecent($search: String, $genre: String, $today: FuzzyDateInt, $page: Int, $perPage: Int) {
+        Page(page: $page, perPage: $perPage) {
+          pageInfo {
+            total
+            currentPage
+            lastPage
+            hasNextPage
+            perPage
+          }
+          media(
+            type: ANIME,
+            search: $search,
+            genre: $genre,
+            status_in: [RELEASING, FINISHED],
+            startDate_lesser: $today,
+            startDate_greater: 19600101,
+            sort: [START_DATE_DESC],
+            isAdult: false
+          ) {
+            ${MEDIA_FRAGMENT}
+          }
         }
       }
-    }
-  `;
+    `
+    : `
+      query SearchAnime($search: String, $genre: String, $sort: [MediaSort], $statusIn: [MediaStatus], $page: Int, $perPage: Int) {
+        Page(page: $page, perPage: $perPage) {
+          pageInfo {
+            total
+            currentPage
+            lastPage
+            hasNextPage
+            perPage
+          }
+          media(
+            type: ANIME,
+            search: $search,
+            genre: $genre,
+            sort: $sort,
+            status_in: $statusIn,
+            isAdult: false
+          ) {
+            ${MEDIA_FRAGMENT}
+          }
+        }
+      }
+    `;
+
+  const variables = isRecentSort
+    ? {
+        search: searchStr,
+        genre: aniGenre,
+        today: todayFuzzy,
+        page,
+        perPage,
+      }
+    : {
+        search: searchStr,
+        genre: aniGenre,
+        sort: [sort],
+        statusIn: isScoreSort ? ['RELEASING', 'FINISHED'] : undefined,
+        page,
+        perPage,
+      };
 
   const data = await queryAniList<{
     Page: {
@@ -1099,18 +1158,30 @@ export async function fetchCatalogPage(options: {
       };
       media: AniListMediaRaw[];
     };
-  }>(query, {
-    search: searchStr,
-    genre: aniGenre,
-    sort: [sort],
-    page,
-    perPage,
-  });
+  }>(query, variables);
 
   const rawMedia = data.Page.media ?? [];
   const seedIds = new Set(rawMedia.map((m) => m.id));
   const hydrated = await hydrateFranchiseMedia(rawMedia);
-  const items = groupFranchiseCatalog(hydrated, 0, seedIds);
+  let items = groupFranchiseCatalog(hydrated, 0, seedIds);
+
+  // Apply accurate ordering over the fetched page items:
+  if (sort === 'START_DATE_DESC') {
+    // Exclude completely unreleased items, then sort by latest released episode air date (newest first)
+    items = items.filter((a) => a.status !== 'À venir' && a.episodesCount > 0);
+    items.sort((a, b) => {
+      const timeA = getLatestReleasedEpisodeAirTime(a);
+      const timeB = getLatestReleasedEpisodeAirTime(b);
+      return timeB - timeA;
+    });
+  } else if (sort === 'SCORE_DESC') {
+    // Sort by rating from highest to lowest, treating unrated anime as lowest
+    items = [...items].sort((a, b) => {
+      const scoreA = typeof a.score === 'number' ? a.score : -1;
+      const scoreB = typeof b.score === 'number' ? b.score : -1;
+      return scoreB - scoreA;
+    });
+  }
 
   const total = data.Page.pageInfo?.total ?? items.length;
   const lastPage = data.Page.pageInfo?.lastPage ?? Math.max(1, Math.ceil(total / perPage));

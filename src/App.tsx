@@ -21,6 +21,7 @@ import {
   formatRemainingMinutes,
   formatTimecode,
   getAllSeriesEpisodes,
+  getLatestReleasedEpisodeAirTime,
   getSeriesSeasons,
   type AnimeSeries,
   type AudioTrack,
@@ -366,10 +367,33 @@ export default function App() {
   }, [catalogSeries, selectedAudio, selectedGenre, trendingSeries]);
 
   const displayedCatalogue = useMemo(() => {
-    return catalogSeries.filter(
+    const filtered = catalogSeries.filter(
       (a) => selectedAudio === 'Tous' || a.audioTracks.includes(selectedAudio)
     );
-  }, [catalogSeries, selectedAudio]);
+
+    if (catalogSort === 'START_DATE_DESC') {
+      return [...filtered].sort((a, b) => {
+        const isAUpcoming = a.status === 'À venir' || a.episodesCount === 0;
+        const isBUpcoming = b.status === 'À venir' || b.episodesCount === 0;
+        if (isAUpcoming && !isBUpcoming) return 1;
+        if (!isAUpcoming && isBUpcoming) return -1;
+
+        const timeA = getLatestReleasedEpisodeAirTime(a);
+        const timeB = getLatestReleasedEpisodeAirTime(b);
+        return timeB - timeA;
+      });
+    }
+
+    if (catalogSort === 'SCORE_DESC') {
+      return [...filtered].sort((a, b) => {
+        const scoreA = typeof a.score === 'number' ? a.score : -1;
+        const scoreB = typeof b.score === 'number' ? b.score : -1;
+        return scoreB - scoreA;
+      });
+    }
+
+    return filtered;
+  }, [catalogSeries, catalogSort, selectedAudio]);
 
   const heroAction = activeHero ? getPrimaryActionForAnime(activeHero) : null;
   const heroInWatchlist = activeHero ? watchlistIds.includes(activeHero.id) : false;

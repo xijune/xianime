@@ -144,6 +144,82 @@ export function getAllSeriesEpisodes(anime: AnimeSeries): Episode[] {
   return anime.episodes.filter((e) => !e.isUpcoming);
 }
 
+/**
+ * Returns the timestamp (in milliseconds) of the most recently released episode
+ * for an anime franchise. Strictly excludes upcoming episodes.
+ */
+export function getLatestReleasedEpisodeAirTime(anime: AnimeSeries): number {
+  const now = Date.now();
+  const allSeasons = getSeriesSeasons(anime);
+  let maxTime = 0;
+
+  // 1. Check all released episodes in all available seasons
+  for (const s of allSeasons) {
+    if (s.status === 'À venir') continue;
+
+    // Check ongoing nextAiringEpisode to deduce the broadcast time of the latest aired episode
+    if (s.nextAiringEpisode && s.nextAiringEpisode > 1 && s.nextAiringAt) {
+      const diffToLatestAired = 1; // latest released episode was 1 episode prior
+      const latestAiredSec = s.nextAiringAt - diffToLatestAired * 7 * 86400;
+      if (latestAiredSec * 1000 <= now && latestAiredSec * 1000 > maxTime) {
+        maxTime = latestAiredSec * 1000;
+      }
+    }
+
+    for (const ep of s.episodes) {
+      if (ep.isUpcoming) continue;
+      if (ep.airingAt && ep.airingAt * 1000 <= now) {
+        if (ep.airingAt * 1000 > maxTime) {
+          maxTime = ep.airingAt * 1000;
+        }
+      } else if (ep.airedDate) {
+        const parsed = new Date(
+          ep.airedDate.length === 10 ? `${ep.airedDate}T12:00:00` : ep.airedDate
+        );
+        const t = parsed.getTime();
+        if (!Number.isNaN(t) && t <= now && t > maxTime) {
+          maxTime = t;
+        }
+      }
+    }
+  }
+
+  if (maxTime > 0) return maxTime;
+
+  // 2. Fallback to ongoing series nextAiringEpisode if present
+  if (anime.nextAiringEpisode && anime.nextAiringEpisode > 1 && anime.nextAiringAt) {
+    const latestAiredSec = anime.nextAiringAt - 7 * 86400;
+    if (latestAiredSec * 1000 <= now) {
+      return latestAiredSec * 1000;
+    }
+  }
+
+  // 3. Fallback to anime start date if episode air date is missing
+  const sd = anime.startDate;
+  if (sd?.year) {
+    const fallbackDate = new Date(
+      sd.year,
+      sd.month ? sd.month - 1 : 0,
+      sd.day || 1,
+      12,
+      0,
+      0
+    );
+    const t = fallbackDate.getTime();
+    if (!Number.isNaN(t) && t <= now) {
+      return t;
+    }
+  } else if (anime.year) {
+    const fallbackDate = new Date(anime.year, 0, 1, 12, 0, 0);
+    const t = fallbackDate.getTime();
+    if (!Number.isNaN(t) && t <= now) {
+      return t;
+    }
+  }
+
+  return 0;
+}
+
 export function formatAiringDateFr(unixSeconds?: number): string {
   if (!unixSeconds) return 'Date à confirmer';
   const date = new Date(unixSeconds * 1000);
