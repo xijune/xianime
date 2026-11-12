@@ -3,6 +3,9 @@ import {
   auth,
   db,
   signInAnonymously,
+  signInWithPopup,
+  signOut,
+  googleProvider,
   onAuthStateChanged,
   collection,
   doc,
@@ -13,6 +16,7 @@ import {
   OperationType,
   type User,
 } from '../services/firebase';
+import { linkWithPopup } from 'firebase/auth';
 import type { UserProfile } from '../types/profile';
 
 const PROFILES_STORAGE_KEY = 'kurostream_profiles_cache_v2';
@@ -30,11 +34,17 @@ const DEFAULT_PROFILE: UserProfile = {
   updatedAt: 1700000000000,
 };
 
+/** Firestore path root for a user's profiles */
+export function userProfilesPath(uid: string) {
+  return `users/${uid}/profiles`;
+}
+
 export function useProfiles() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // Initial arrival check: has the user picked a profile during this session?
   const [hasSelectedSessionProfile, setHasSelectedSessionProfile] = useState<boolean>(() => {
     try {
       return sessionStorage.getItem(SESSION_PROFILE_CHOSEN_KEY) === 'true';
@@ -66,7 +76,7 @@ export function useProfiles() {
     return DEFAULT_PROFILE.id;
   });
 
-  // 1. Silent background authentication so all devices can connect to Firestore
+  // 1. Auth: existing session or silent anonymous
   useEffect(() => {
     let unmounted = false;
 
@@ -98,19 +108,20 @@ export function useProfiles() {
     };
   }, []);
 
-  // 2. Real-time sync from top-level /profiles collection in Firestore
+  // 2. Real-time sync: users/{uid}/profiles
   useEffect(() => {
     if (!currentUser) return;
-    const colRef = collection(db, 'profiles');
+
+    const colPath = userProfilesPath(currentUser.uid);
+    const colRef = collection(db, colPath);
 
     const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
         if (snapshot.empty) {
-          // Initialize database with default profile if empty
           const baseProfiles = profiles.length > 0 ? profiles : [DEFAULT_PROFILE];
           baseProfiles.forEach((p) => {
-            void setDoc(doc(db, 'profiles', p.id), {
+            void setDoc(doc(db, colPath, p.id), {
               name: p.name,
               avatar: p.avatar,
               color: p.color,
@@ -119,7 +130,7 @@ export function useProfiles() {
               createdAt: new Date(p.createdAt).toISOString(),
               updatedAt: new Date(p.updatedAt).toISOString(),
             }).catch((err) =>
-              handleFirestoreError(err, OperationType.WRITE, `profiles/${p.id}`)
+              handleFirestoreError(err, OperationType.WRITE, `${colPath}/${p.id}`)
             );
           });
           return;
@@ -149,21 +160,20 @@ export function useProfiles() {
           // Ignore
         }
 
-        // Keep activeProfileId valid
-        setActiveProfileId((curr) => {
-          if (remoteProfiles.some((p) => p.id === curr)) return curr;
+        setActiveProfileId((prev) => {
+          if (remoteProfiles.some((p) => p.id === prev)) return prev;
           return remoteProfiles[0]?.id ?? DEFAULT_PROFILE.id;
         });
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, 'profiles');
+        handleFirestoreError(error, OperationType.LIST, colPath);
       }
     );
 
     return () => unsubscribe();
-  }, [currentUser]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.uid]);
 
-  // Persist activeProfileId to local storage
   useEffect(() => {
     try {
       localStorage.setItem(ACTIVE_PROFILE_STORAGE_KEY, activeProfileId);
@@ -224,7 +234,7 @@ export function useProfiles() {
       }
 
       if (currentUser) {
-        const docPath = `profiles/${newId}`;
+        const docPath = `${userProfilesPath(currentUser.uid)}/${newId}`;
         try {
           await setDoc(doc(db, docPath), {
             name: newProf.name,
@@ -248,12 +258,17 @@ export function useProfiles() {
   const updateProfile = useCallback(
     async (profileId: string, patch: Partial<UserProfile>) => {
       const now = Date.now();
-      let updatedProfile: UserProfile | undefined;
+      let updatedProfile: UserProfile | null = null;
 
       setProfiles((prev) => {
         const next = prev.map((p) => {
           if (p.id === profileId) {
-            updatedProfile = { ...p, ...patch, updatedAt: now };
+            updatedProfile = {
+              ...p,
+              ...patch,
+              id: p.id,
+              updatedAt: now,
+            };
             return updatedProfile;
           }
           return p;
@@ -266,8 +281,9 @@ export function useProfiles() {
         return next;
       });
 
-      // Target document in Firestore
-      const docPath = `profiles/${profileId}`;
+      if (!currentUser) return;
+
+      const docPath = `${userProfilesPath(currentUser.uid)}/${profileId}`;
       try {
         const target =
           updatedProfile ??
@@ -298,13 +314,12 @@ export function useProfiles() {
         handleFirestoreError(err, OperationType.UPDATE, docPath);
       }
     },
-    [profiles]
+    [profiles, currentUser]
   );
 
   const deleteProfile = useCallback(
     async (profileId: string) => {
       if (profiles.length <= 1) {
-        // At least one profile must exist; reset to default
         await updateProfile(profileId, {
           name: 'Principal',
           avatar: 'kuro',
@@ -327,7 +342,7 @@ export function useProfiles() {
       }
 
       if (currentUser) {
-        const docPath = `profiles/${profileId}`;
+        const docPath = `${userProfilesPath(currentUser.uid)}/${profileId}`;
         try {
           await deleteDoc(doc(db, docPath));
         } catch (err) {
@@ -338,9 +353,87 @@ export function useProfiles() {
     [profiles, activeProfileId, currentUser, updateProfile]
   );
 
+  /**
+   * Connexion Google : le même compte (et ses profils) sur tous les appareils.
+   * Si session anonyme, tente d'abord un link pour conserver les données.
+   */
+  const signInWithGoogle = useCallback(async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const user = auth.currentUser;
+      if (user && user.isAnonymous) {
+        try {
+          await linkWithPopup(user, googleProvider);
+          return;
+        } catch (linkErr: unknown) {
+          const code =
+            linkErr && typeof linkErr === 'object' && 'code' in linkErr
+              ? String((linkErr as { code: string }).code)
+              : '';
+          if (
+            code !== 'auth/credential-already-in-use' &&
+            code !== 'auth/email-already-in-use' &&
+            code !== 'auth/provider-already-linked'
+          ) {
+            throw linkErr;
+          }
+        }
+      }
+      await signInWithPopup(auth, googleProvider);
+      setHasSelectedSessionProfile(false);
+      try {
+        sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
+      } catch {
+        // Ignore
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Connexion Google impossible';
+      console.warn('Google sign-in failed:', err);
+      setAuthError(message);
+      throw err;
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const signOutUser = useCallback(async () => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await signOut(auth);
+      setHasSelectedSessionProfile(false);
+      try {
+        sessionStorage.removeItem(SESSION_PROFILE_CHOSEN_KEY);
+        localStorage.removeItem(PROFILES_STORAGE_KEY);
+      } catch {
+        // Ignore
+      }
+      setProfiles([DEFAULT_PROFILE]);
+      setActiveProfileId(DEFAULT_PROFILE.id);
+    } catch (err) {
+      console.warn('Sign-out failed:', err);
+      setAuthError(err instanceof Error ? err.message : 'Déconnexion impossible');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
+
+  const isAnonymous = Boolean(currentUser?.isAnonymous);
+  const isGoogleUser = Boolean(
+    currentUser &&
+      !currentUser.isAnonymous &&
+      currentUser.providerData?.some((p) => p.providerId === 'google.com')
+  );
+
   return {
     currentUser,
     authLoading,
+    authBusy,
+    authError,
+    isAnonymous,
+    isGoogleUser,
     profiles,
     activeProfile,
     activeProfileId,
@@ -349,5 +442,7 @@ export function useProfiles() {
     createProfile,
     updateProfile,
     deleteProfile,
+    signInWithGoogle,
+    signOutUser,
   };
 }
