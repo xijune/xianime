@@ -18,6 +18,11 @@ import {
   type User,
 } from '../services/firebase';
 
+/** users/{uid}/profiles/{profileId}/... */
+function profileSubPath(uid: string, profileId: string, sub: string) {
+  return `users/${uid}/profiles/${profileId}/${sub}`;
+}
+
 export interface EpisodeProgress {
   animeId: string;
   episodeId: string;
@@ -143,7 +148,7 @@ export function useWatchProgress(
   useEffect(() => {
     if (!currentUser || !activeProfileId) return;
 
-    const path = `profiles/${activeProfileId}/watchlist`;
+    const path = profileSubPath(currentUser.uid, activeProfileId, 'watchlist');
     const colRef = collection(db, path);
 
     const unsubscribe = onSnapshot(
@@ -178,7 +183,7 @@ export function useWatchProgress(
   useEffect(() => {
     if (!currentUser || !activeProfileId) return;
 
-    const path = `profiles/${activeProfileId}/progress`;
+    const path = profileSubPath(currentUser.uid, activeProfileId, 'progress');
     const colRef = collection(db, path);
 
     const unsubscribe = onSnapshot(
@@ -262,7 +267,8 @@ export function useWatchProgress(
 
       // Async sync to Firestore
       if (activeProfileId) {
-        const docPath = `profiles/${activeProfileId}/progress/${episode.id}`;
+        if (!currentUser) return;
+        const docPath = profileSubPath(currentUser.uid, activeProfileId, `progress/${episode.id}`);
         void setDoc(doc(db, docPath), {
           animeId: anime.id,
           episodeId: episode.id,
@@ -282,7 +288,7 @@ export function useWatchProgress(
         });
       }
     },
-    [activeProfileId]
+    [activeProfileId, currentUser]
   );
 
   const removeEpisodeProgress = useCallback(
@@ -297,13 +303,14 @@ export function useWatchProgress(
       });
 
       if (activeProfileId) {
-        const docPath = `profiles/${activeProfileId}/progress/${episodeId}`;
+        if (!currentUser) return;
+        const docPath = profileSubPath(currentUser.uid, activeProfileId, `progress/${episodeId}`);
         void deleteDoc(doc(db, docPath)).catch((err) =>
           handleFirestoreError(err, OperationType.DELETE, docPath)
         );
       }
     },
-    [activeProfileId]
+    [activeProfileId, currentUser]
   );
 
   const removeAnimeProgress = useCallback(
@@ -324,16 +331,16 @@ export function useWatchProgress(
         };
       });
 
-      if (activeProfileId && toDeleteIds.length > 0) {
+      if (currentUser && activeProfileId && toDeleteIds.length > 0) {
         toDeleteIds.forEach((epId) => {
-          const docPath = `profiles/${activeProfileId}/progress/${epId}`;
+          const docPath = profileSubPath(currentUser.uid, activeProfileId, `progress/${epId}`);
           void deleteDoc(doc(db, docPath)).catch((err) =>
             handleFirestoreError(err, OperationType.DELETE, docPath)
           );
         });
       }
     },
-    [activeProfileId]
+    [activeProfileId, currentUser]
   );
 
 
@@ -359,7 +366,8 @@ export function useWatchProgress(
       });
 
       if (activeProfileId) {
-        const docPath = `profiles/${activeProfileId}/watchlist/${anime.id}`;
+        if (!currentUser) return;
+        const docPath = profileSubPath(currentUser.uid, activeProfileId, `watchlist/${anime.id}`);
         if (isAdding) {
           void setDoc(doc(db, docPath), {
             animeId: anime.id,
@@ -378,7 +386,7 @@ export function useWatchProgress(
         }
       }
     },
-    [activeProfileId]
+    [activeProfileId, currentUser]
   );
 
   const updatePreferences = useCallback((patch: Partial<PlayerPreferences>) => {

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Edit3, Plus, X, Check } from 'lucide-react';
+import { Edit3, Plus, X, LogIn, LogOut, Loader2 } from 'lucide-react';
 import type { UserProfile } from '../types/profile';
 import { ProfileAvatar } from './ProfileAvatar';
 import { ProfileEditModal } from './ProfileEditModal';
@@ -19,6 +19,13 @@ interface ProfileSelectModalProps {
   onUpdateProfile: (profileId: string, patch: Partial<UserProfile>) => Promise<void>;
   onDeleteProfile: (profileId: string) => Promise<void>;
   onClose: () => void;
+  /** Compte Google connecté → mêmes profils sur tous les appareils */
+  isGoogleUser?: boolean;
+  accountLabel?: string | null;
+  authBusy?: boolean;
+  authError?: string | null;
+  onSignInWithGoogle?: () => Promise<void>;
+  onSignOut?: () => Promise<void>;
 }
 
 export function ProfileSelectModal({
@@ -30,6 +37,12 @@ export function ProfileSelectModal({
   onUpdateProfile,
   onDeleteProfile,
   onClose,
+  isGoogleUser = false,
+  accountLabel = null,
+  authBusy = false,
+  authError = null,
+  onSignInWithGoogle,
+  onSignOut,
 }: ProfileSelectModalProps) {
   const [managing, setManaging] = useState(false);
   const [editingProfile, setEditingProfile] = useState<UserProfile | null>(null);
@@ -43,7 +56,6 @@ export function ProfileSelectModal({
       }}
     >
       <div className="w-full max-w-4xl flex flex-col items-center my-auto py-8">
-        {/* Top close button (only if canClose is true) */}
         {canClose ? (
           <div className="w-full flex justify-end mb-4">
             <button
@@ -62,18 +74,88 @@ export function ProfileSelectModal({
         <h1 className="text-3xl sm:text-5xl font-display font-bold text-white tracking-tight mb-3 text-center">
           {managing ? 'Gérer les profils' : 'Qui regarde ?'}
         </h1>
-        <p className="text-sm sm:text-base text-zinc-400 mb-10 text-center max-w-md">
+        <p className="text-sm sm:text-base text-zinc-400 mb-6 text-center max-w-md">
           {managing
             ? 'Sélectionnez un profil pour modifier son nom, son avatar ou le supprimer.'
-            : 'Chaque profil conserve sa propre liste d’animés et son suivi d’épisodes indépendant.'}
+            : 'Chaque profil a sa propre liste et sa progression.'}
         </p>
 
+        {/* Compte cloud — synchronisation multi-appareils */}
+        <div className="w-full max-w-md mb-8 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3.5 flex flex-col gap-2.5">
+          {isGoogleUser ? (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-wider text-zinc-500 font-semibold">
+                    Compte synchronisé
+                  </p>
+                  <p className="text-sm text-white truncate">
+                    {accountLabel || 'Google'}
+                  </p>
+                </div>
+                {onSignOut ? (
+                  <button
+                    type="button"
+                    disabled={authBusy}
+                    onClick={() => void onSignOut()}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white/8 hover:bg-white/14 text-zinc-200 border border-white/12 disabled:opacity-50 cursor-pointer"
+                  >
+                    {authBusy ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <LogOut className="w-3.5 h-3.5" />
+                    )}
+                    Déconnexion
+                  </button>
+                ) : null}
+              </div>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Tes profils, watchlist et progression sont liés à ce compte et disponibles sur tous tes appareils.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] uppercase tracking-wider text-zinc-500 font-semibold">
+                    Mode invité (cet appareil)
+                  </p>
+                  <p className="text-sm text-zinc-300">
+                    Connecte-toi pour retrouver tes profils partout
+                  </p>
+                </div>
+                {onSignInWithGoogle ? (
+                  <button
+                    type="button"
+                    disabled={authBusy}
+                    onClick={() => void onSignInWithGoogle()}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white text-black hover:bg-zinc-200 disabled:opacity-50 cursor-pointer shrink-0"
+                  >
+                    {authBusy ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <LogIn className="w-3.5 h-3.5" />
+                    )}
+                    Google
+                  </button>
+                ) : null}
+              </div>
+              <p className="text-[11px] text-zinc-500 leading-relaxed">
+                Sans connexion, les profils restent locaux à cet appareil. Avec Google, le même profil suit sur téléphone, PC, etc.
+              </p>
+            </>
+          )}
+          {authError ? (
+            <p className="text-[11px] text-amber-300/90 leading-relaxed">{authError}</p>
+          ) : null}
+        </div>
+
         {/* Profiles Grid */}
-        <div className="flex flex-wrap items-center justify-center gap-6 sm:gap-10 mb-10">
+        <div className="flex flex-wrap justify-center gap-6 sm:gap-8 mb-10 max-w-3xl">
           {profiles.map((p) => {
             const isActive = p.id === activeProfileId;
             return (
-              <div key={p.id} className="flex flex-col items-center group relative">
+              <div key={p.id} className="flex flex-col items-center group">
                 <button
                   type="button"
                   onClick={() => {
@@ -81,47 +163,33 @@ export function ProfileSelectModal({
                       setEditingProfile(p);
                     } else {
                       onSelectProfile(p.id);
-                      onClose();
                     }
                   }}
-                  className={`relative p-1.5 rounded-3xl transition-transform duration-200 cursor-pointer ${
-                    managing
-                      ? 'hover:scale-105 opacity-90 hover:opacity-100'
-                      : 'hover:scale-105 active:scale-95'
+                  className={`relative rounded-3xl transition-all cursor-pointer hover:scale-105 ${
+                    isActive && !managing
+                      ? 'ring-2 ring-[#FF5E1A] ring-offset-2 ring-offset-[#0B0C10]'
+                      : ''
                   }`}
+                  title={managing ? `Modifier ${p.name}` : `Regarder en tant que ${p.name}`}
                 >
                   <ProfileAvatar avatar={p.avatar} color={p.color} size="xl" />
-
-                  {/* Active indicator */}
-                  {!managing && isActive ? (
-                    <span className="absolute -top-1.5 -right-1.5 w-6 h-6 rounded-full bg-[#FF5E1A] border-2 border-[#111319] flex items-center justify-center text-white text-xs shadow-md">
-                      <Check className="w-3.5 h-3.5 stroke-[3]" />
+                  {managing ? (
+                    <span className="absolute -bottom-1 -right-1 w-8 h-8 rounded-full bg-[#FF5E1A] text-white flex items-center justify-center shadow-lg border-2 border-[#0B0C10]">
+                      <Edit3 className="w-3.5 h-3.5" />
                     </span>
                   ) : null}
-
-                  {/* Edit overlay in managing mode */}
-                  {managing ? (
-                    <div className="absolute inset-0 bg-black/60 rounded-3xl flex items-center justify-center text-white backdrop-blur-[2px] transition-opacity">
-                      <div className="w-10 h-10 rounded-full bg-white/20 border border-white/40 flex items-center justify-center shadow-lg">
-                        <Edit3 className="w-5 h-5" />
-                      </div>
-                    </div>
-                  ) : null}
                 </button>
-
-                <div className="mt-3 text-center">
-                  <span className="block text-sm sm:text-base font-semibold text-zinc-200 group-hover:text-white transition-colors truncate max-w-[130px]">
-                    {p.name}
-                  </span>
-                  <span className="inline-block text-[11px] font-mono text-zinc-500 uppercase tracking-wider mt-0.5">
-                    {p.defaultAudio}
-                  </span>
-                </div>
+                <span
+                  className={`mt-3 text-xs sm:text-sm font-medium transition-colors max-w-[100px] truncate ${
+                    isActive && !managing ? 'text-white' : 'text-zinc-400 group-hover:text-white'
+                  }`}
+                >
+                  {p.name}
+                </span>
               </div>
             );
           })}
 
-          {/* Add Profile Card */}
           {profiles.length < 6 ? (
             <div className="flex flex-col items-center group">
               <button
@@ -139,7 +207,6 @@ export function ProfileSelectModal({
           ) : null}
         </div>
 
-        {/* Manage / Done button */}
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -155,7 +222,6 @@ export function ProfileSelectModal({
         </div>
       </div>
 
-      {/* Edit existing profile modal */}
       {editingProfile ? (
         <ProfileEditModal
           profileToEdit={editingProfile}
@@ -172,7 +238,6 @@ export function ProfileSelectModal({
         />
       ) : null}
 
-      {/* Create new profile modal */}
       {showCreateModal ? (
         <ProfileEditModal
           profileToEdit={null}

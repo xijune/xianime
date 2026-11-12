@@ -82,6 +82,11 @@ export default function App() {
     createProfile,
     updateProfile,
     deleteProfile,
+    isGoogleUser,
+    authBusy,
+    authError,
+    signInWithGoogle,
+    signOutUser,
   } = useProfiles();
 
   const {
@@ -1878,6 +1883,12 @@ export default function App() {
             await deleteProfile(id);
           }}
           onClose={() => setProfileSelectOpen(false)}
+          isGoogleUser={isGoogleUser}
+          accountLabel={currentUser?.email ?? currentUser?.displayName ?? null}
+          authBusy={authBusy}
+          authError={authError}
+          onSignInWithGoogle={signInWithGoogle}
+          onSignOut={signOutUser}
         />
       ) : null}
 
