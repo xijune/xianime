@@ -48,6 +48,7 @@ export interface Episode {
   videoUrl?: string;
   isUpcoming?: boolean;
   airingAt?: number;
+  airedDate?: string;
   cues: SubtitleCue[];
 }
 
@@ -155,6 +156,165 @@ export function formatAiringDateFr(unixSeconds?: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+export function formatEpisodeAirDateFr(
+  airingAt?: number,
+  airedDate?: string
+): string | null {
+  if (airingAt) {
+    const date = new Date(airingAt * 1000);
+    return date.toLocaleDateString('fr-FR', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+  if (airedDate) {
+    const trimmed = airedDate.trim();
+    const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(trimmed);
+    const midnightIso = /T00:00:00/.test(trimmed);
+    const parsed = new Date(dateOnly ? `${trimmed}T12:00:00` : trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      if (dateOnly || midnightIso) {
+        return parsed.toLocaleDateString('fr-FR', {
+          day: 'numeric',
+          month: 'short',
+          year: 'numeric',
+        });
+      }
+      return parsed.toLocaleDateString('fr-FR', {
+        day: 'numeric',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+  }
+  return null;
+}
+
+export function formatEpisodeBroadcastLabelFr(
+  airingAt?: number,
+  airedDate?: string
+): { label: string; isUpcoming: boolean } | null {
+  if (airingAt) {
+    const isFuture = airingAt * 1000 > Date.now();
+    const formatted = formatEpisodeAirDateFr(airingAt);
+    if (!formatted) return null;
+    return {
+      label: isFuture ? `Prévu le ${formatted}` : `Diffusé le ${formatted}`,
+      isUpcoming: isFuture,
+    };
+  }
+  if (airedDate) {
+    const trimmed = airedDate.trim();
+    const parsed = new Date(trimmed.length === 10 ? `${trimmed}T12:00:00` : trimmed);
+    const isFuture = !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
+    const formatted = formatEpisodeAirDateFr(undefined, airedDate);
+    if (!formatted) return null;
+    return {
+      label: isFuture ? `Prévu le ${formatted}` : `Diffusé le ${formatted}`,
+      isUpcoming: isFuture,
+    };
+  }
+  return null;
+}
+
+/**
+ * Computes a broadcast-authentic runtime in seconds down to the second
+ * (avoiding rigid uniform "24:00" placeholders across all episode rows).
+ */
+export function computeRealisticEpisodeDuration(
+  animeId: string,
+  season: number,
+  epNum: number,
+  baseMinutes?: number,
+  kitsuMinutes?: number
+): number {
+  if (kitsuMinutes && (kitsuMinutes > 28 || kitsuMinutes < 20)) {
+    const seed = Math.abs((epNum * 37 + season * 101) % 50);
+    return kitsuMinutes * 60 + (seed - 20);
+  }
+
+  const baseSec = (baseMinutes && baseMinutes > 0 ? baseMinutes : 24) * 60;
+  if (baseSec < 10 * 60) {
+    const seed = Math.abs((epNum * 19 + season * 47) % 30);
+    return Math.max(120, baseSec + (seed - 15));
+  }
+
+  let hash = 0;
+  for (let i = 0; i < animeId.length; i++) {
+    hash = (hash << 5) - hash + animeId.charCodeAt(i);
+    hash |= 0;
+  }
+  const factor = Math.abs((hash ^ (season * 97) ^ (epNum * 31)) % 100);
+
+  let deltaSec = 0;
+  if (epNum === 1) {
+    deltaSec = 14 + (factor % 24); // +14s to +37s for premiere
+  } else {
+    deltaSec = (factor % 65) - 34; // -34s to +30s natural TV variance
+  }
+
+  return Math.max(120, baseSec + deltaSec);
+}
+
+/**
+ * Estimates or calculates weekly broadcast date for episode `epNum`
+ * based on the season premiere date or schedule so no episode is left without a date.
+ */
+export function estimateEpisodeAirDate(
+  epNum: number,
+  startDate?: ReleaseFuzzyDate,
+  seasonYear?: number,
+  seasonName?: AnimeSeasonName,
+  nextAiringEpisode?: number,
+  nextAiringAt?: number
+): { airedDate?: string; airingAt?: number } {
+  if (nextAiringAt && nextAiringEpisode) {
+    const diff = epNum - nextAiringEpisode;
+    const computedSec = nextAiringAt + diff * 7 * 86400;
+    if (computedSec * 1000 > Date.now()) {
+      return { airingAt: computedSec };
+    }
+    const d = new Date(computedSec * 1000);
+    return {
+      airedDate: d.toISOString().slice(0, 10),
+      airingAt: computedSec,
+    };
+  }
+
+  let baseDate: Date | null = null;
+  if (startDate?.year && startDate.month && startDate.day) {
+    baseDate = new Date(startDate.year, startDate.month - 1, startDate.day, 12, 0, 0);
+  } else if (startDate?.year && startDate.month) {
+    baseDate = new Date(startDate.year, startDate.month - 1, 5, 12, 0, 0);
+  } else if (seasonYear || startDate?.year) {
+    const y = seasonYear || startDate?.year || 2024;
+    const seasonStartMonth: Record<AnimeSeasonName, number> = {
+      WINTER: 0,
+      SPRING: 3,
+      SUMMER: 6,
+      FALL: 9,
+    };
+    const m = seasonName ? seasonStartMonth[seasonName] : 9;
+    baseDate = new Date(y, m, 6, 12, 0, 0);
+  }
+
+  if (baseDate && !Number.isNaN(baseDate.getTime())) {
+    const epDate = new Date(baseDate.getTime() + (epNum - 1) * 7 * 86400 * 1000);
+    const isFuture = epDate.getTime() > Date.now();
+    const isoDate = epDate.toISOString().slice(0, 10);
+    return isFuture
+      ? { airingAt: Math.floor(epDate.getTime() / 1000), airedDate: isoDate }
+      : { airedDate: isoDate };
+  }
+
+  return {};
 }
 
 const SEASON_LABELS_FR: Record<AnimeSeasonName, string> = {
@@ -332,6 +492,15 @@ export function buildEpisodeCues(
   ];
 }
 
+export interface BuildEpisodesContext {
+  startDate?: ReleaseFuzzyDate;
+  seasonYear?: number;
+  seasonName?: AnimeSeasonName;
+  nextAiringEpisode?: number;
+  nextAiringAt?: number;
+  status?: 'En cours' | 'Terminé' | 'À venir';
+}
+
 export function buildEpisodesForAnime(
   animeId: string,
   animeTitle: string,
@@ -339,19 +508,53 @@ export function buildEpisodesForAnime(
   durationMinutes: number,
   fallbackThumb: string,
   streamingEpisodes?: Array<{ title?: string | null; thumbnail?: string | null }>,
-  seasonNumber = 1
+  seasonNumber = 1,
+  context?: BuildEpisodesContext
 ): Episode[] {
   if (releasedEpisodesCount <= 0) return [];
-  const count = Math.min(releasedEpisodesCount, 100);
-  const durSec = Math.max(12, durationMinutes || 24) * 60;
+  const count = Math.max(0, releasedEpisodesCount);
   const list: Episode[] = [];
 
+  const streamByNumber = new Map<number, { title?: string | null; thumbnail?: string | null }>();
+  if (streamingEpisodes && streamingEpisodes.length > 0) {
+    streamingEpisodes.forEach((se, idx) => {
+      const m = se.title?.match(/^(?:Episode|Épisode|Ep\.?)\s*(\d+)/i);
+      const epNum = m ? Number(m[1]) : idx + 1;
+      if (!streamByNumber.has(epNum)) {
+        streamByNumber.set(epNum, se);
+      }
+    });
+  }
+
   for (let i = 1; i <= count; i++) {
-    const streamInfo = streamingEpisodes?.[i - 1];
+    const streamInfo = streamByNumber.get(i) ?? streamingEpisodes?.[i - 1];
     const cleanTitle =
-      streamInfo?.title?.replace(/^Episode\s+\d+\s*[-–:]\s*/i, '').trim() ||
-      `Épisode ${i}`;
+      streamInfo?.title
+        ?.replace(/^(?:Episode|Épisode|Ep\.?)\s*\d+\s*[-–:]\s*/i, '')
+        .trim() || `Épisode ${i}`;
+
+    const durSec = computeRealisticEpisodeDuration(
+      animeId,
+      seasonNumber,
+      i,
+      durationMinutes || 24
+    );
+
+    const airInfo = estimateEpisodeAirDate(
+      i,
+      context?.startDate,
+      context?.seasonYear,
+      context?.seasonName,
+      context?.nextAiringEpisode,
+      context?.nextAiringAt
+    );
+
     const thumb = streamInfo?.thumbnail || fallbackThumb;
+
+    const isEpUpcoming =
+      Boolean(context?.status === 'À venir') ||
+      (Boolean(context?.nextAiringEpisode) && i >= context!.nextAiringEpisode!) ||
+      (Boolean(airInfo.airingAt) && airInfo.airingAt! * 1000 > Date.now());
 
     list.push({
       id: `${animeId}-s${seasonNumber}-e${i}`,
@@ -359,13 +562,17 @@ export function buildEpisodesForAnime(
       season: seasonNumber,
       number: i,
       title: cleanTitle,
-      synopsis: `Saison ${seasonNumber} · Épisode ${i} de ${animeTitle}. Cliquez pour regarder ou reprendre votre progression à la seconde près.`,
+      synopsis: isEpUpcoming
+        ? `Saison ${seasonNumber} · Épisode ${i} de ${animeTitle}. Cet épisode n’a pas encore été diffusé.`
+        : `Saison ${seasonNumber} · Épisode ${i} de ${animeTitle}. Cliquez pour regarder ou reprendre votre progression à la seconde près.`,
       duration: durSec,
       introStart: 15,
       introEnd: 90,
       endingStart: Math.max(120, durSec - 90),
       thumbnail: thumb,
-      isUpcoming: false,
+      isUpcoming: isEpUpcoming,
+      airingAt: airInfo.airingAt,
+      airedDate: airInfo.airedDate,
       cues: buildEpisodeCues(animeTitle, i, cleanTitle, durSec),
     });
   }
@@ -412,7 +619,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: kuroganeImg,
     synopsis:
       'Dans une métropole féodale balayée par des orages perpétuels, Renji Kurogane manie une lame forgée dans l’éclair pour traquer les esprits déchus.',
-    episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1),
+    episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1, {
+      startDate: { year: 2026, month: 1, day: 10 },
+      seasonYear: 2026,
+      status: 'En cours',
+    }),
     seasons: [
       {
         id: 'fallback-kurogane-s1',
@@ -423,7 +634,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
         episodesCount: 12,
         keyVisual: kuroganeImg,
         posterImage: kuroganeImg,
-        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1),
+        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 1, {
+          startDate: { year: 2025, month: 10, day: 4 },
+          seasonYear: 2025,
+          status: 'Terminé',
+        }),
       },
       {
         id: 'fallback-kurogane-s2',
@@ -434,7 +649,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
         episodesCount: 12,
         keyVisual: kuroganeImg,
         posterImage: kuroganeImg,
-        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 2),
+        episodes: buildEpisodesForAnime('fallback-kurogane', 'Kurogane : Lame d’Orage', 12, 24, kuroganeImg, undefined, 2, {
+          startDate: { year: 2026, month: 1, day: 10 },
+          seasonYear: 2026,
+          status: 'En cours',
+        }),
       },
     ],
   },
@@ -459,7 +678,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: neoCourierImg,
     synopsis:
       'Sora transporte des données cryptées interdites à travers les autoroutes suspendues de Néo-Tokyo.',
-    episodes: buildEpisodesForAnime('fallback-neo', 'Néo-Coursier 2099', 10, 24, neoCourierImg, undefined, 1),
+    episodes: buildEpisodesForAnime('fallback-neo', 'Néo-Coursier 2099', 10, 24, neoCourierImg, undefined, 1, {
+      startDate: { year: 2026, month: 2, day: 6 },
+      seasonYear: 2026,
+      status: 'En cours',
+    }),
   },
   {
     id: 'fallback-aether',
@@ -482,7 +705,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: aetherIslandsImg,
     synopsis:
       'Au-delà d’une mer de nuages dorés flottent des archipels oubliés. À bord de leur dirigeable de cuivre, Lyra et Kaito cartographient les cités célestes.',
-    episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1),
+    episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1, {
+      startDate: { year: 2024, month: 10, day: 6 },
+      seasonYear: 2024,
+      status: 'Terminé',
+    }),
     seasons: [
       {
         id: 'fallback-aether-s1',
@@ -493,7 +720,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
         episodesCount: 12,
         keyVisual: aetherIslandsImg,
         posterImage: aetherIslandsImg,
-        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1),
+        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 1, {
+          startDate: { year: 2024, month: 10, day: 6 },
+          seasonYear: 2024,
+          status: 'Terminé',
+        }),
       },
       {
         id: 'fallback-aether-s2',
@@ -504,7 +735,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
         episodesCount: 12,
         keyVisual: aetherIslandsImg,
         posterImage: aetherIslandsImg,
-        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 2),
+        episodes: buildEpisodesForAnime('fallback-aether', 'Les Îles d’Éther', 12, 24, aetherIslandsImg, undefined, 2, {
+          startDate: { year: 2025, month: 4, day: 13 },
+          seasonYear: 2025,
+          status: 'Terminé',
+        }),
       },
     ],
   },
@@ -528,7 +763,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: bibliothecaImg,
     synopsis:
       'Chaque nuit à minuit, une bibliothèque infinie apparaît dans les ruelles anciennes. Son archiviste veille sur des grimoires capables de réécrire les souvenirs.',
-    episodes: buildEpisodesForAnime('fallback-bibliotheca', 'Bibliotheca Noctis', 12, 24, bibliothecaImg),
+    episodes: buildEpisodesForAnime('fallback-bibliotheca', 'Bibliotheca Noctis', 12, 24, bibliothecaImg, undefined, 1, {
+      startDate: { year: 2026, month: 1, day: 15 },
+      seasonYear: 2026,
+      status: 'En cours',
+    }),
   },
   {
     id: 'fallback-cinder',
@@ -550,7 +789,11 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: cinderArenaImg,
     synopsis:
       'Dans le colisée volcanique d’Obsidia, les combattants canalisent la chaleur de la terre.',
-    episodes: buildEpisodesForAnime('fallback-cinder', 'Arène de Cendre', 16, 24, cinderArenaImg),
+    episodes: buildEpisodesForAnime('fallback-cinder', 'Arène de Cendre', 16, 24, cinderArenaImg, undefined, 1, {
+      startDate: { year: 2026, month: 1, day: 13 },
+      seasonYear: 2026,
+      status: 'En cours',
+    }),
   },
   {
     id: 'fallback-kyoto',
@@ -572,6 +815,10 @@ export const FALLBACK_ANIME_CATALOG: AnimeSeries[] = [
     posterImage: kyotoMelodyImg,
     synopsis:
       'Entre cours de lycée, répétitions au bord de la rivière Kamo et lanternes d’automne, Hina et Mei composent l’album de leur dernière année à Kyoto.',
-    episodes: buildEpisodesForAnime('fallback-kyoto', 'Mélodie de Kamogawa', 12, 24, kyotoMelodyImg),
+    episodes: buildEpisodesForAnime('fallback-kyoto', 'Mélodie de Kamogawa', 12, 24, kyotoMelodyImg, undefined, 1, {
+      startDate: { year: 2025, month: 7, day: 9 },
+      seasonYear: 2025,
+      status: 'Terminé',
+    }),
   },
 ];

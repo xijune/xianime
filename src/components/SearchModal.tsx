@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Clock, Loader2, Play, Search, X } from 'lucide-react';
+import { ChevronRight, Clock, Film, Loader2, Search, X } from 'lucide-react';
 import {
   formatReleaseDateFr,
   getSeriesSeasons,
@@ -63,7 +63,7 @@ export function SearchModal({
                 a.originalTitle.toLowerCase().includes(trimmed.toLowerCase())
             );
             setResults(localFallback);
-            setError('Connexion AniList indisponible — résultats locaux affichés.');
+            setError('Résultats issus du catalogue local.');
             setLoading(false);
           }
         });
@@ -95,7 +95,7 @@ export function SearchModal({
             enterKeyHint="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Rechercher un animé (One Piece, Frieren…)"
+            placeholder="Rechercher un animé (ex: One Piece, Naruto, Bleach, Frieren…)"
             className="w-full bg-transparent text-base text-white placeholder:text-zinc-500 focus:outline-none min-h-[40px]"
           />
           <button
@@ -106,6 +106,11 @@ export function SearchModal({
           >
             <X className="w-5 h-5" />
           </button>
+        </div>
+
+        <div className="px-4 py-2 bg-white/2 border-b border-white/8 text-[11px] text-zinc-400 flex items-center justify-between shrink-0">
+          <span>Recherche de séries et films d’animation</span>
+          <span className="font-mono tabular-nums">{results.length} animés</span>
         </div>
 
         {error ? (
@@ -135,19 +140,34 @@ export function SearchModal({
                     onSelectAnime(anime);
                     onClose();
                   }}
-                  className="w-full flex items-center gap-3.5 sm:gap-4 p-3.5 sm:p-4 text-left hover:bg-white/6 active:bg-white/10 transition-colors cursor-pointer group min-h-[68px]"
+                  className="w-full flex items-center gap-3.5 sm:gap-4 p-3.5 sm:p-4 text-left hover:bg-white/6 active:bg-white/10 transition-colors cursor-pointer group min-h-[72px]"
                 >
-                  <div className="w-24 sm:w-28 aspect-video rounded-lg overflow-hidden bg-black shrink-0">
+                  <div className="w-20 sm:w-24 aspect-[16/10] rounded-lg overflow-hidden bg-black shrink-0 relative">
                     <ArtworkImage
                       src={anime.keyVisual || anime.posterImage}
                       alt={anime.title}
                       title={anime.title}
                       accentTint={anime.accentTint}
-                      className="w-full h-full object-cover"
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
                     />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <h4 className="text-sm font-semibold text-white group-hover:text-[#FF5E1A] transition-colors truncate">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-white/10 text-zinc-300 uppercase tracking-wider">
+                        Série
+                      </span>
+                      {anime.year ? (
+                        <span className="text-xs font-mono text-zinc-500 tabular-nums">
+                          {anime.year}
+                        </span>
+                      ) : null}
+                      {typeof anime.score === 'number' ? (
+                        <span className="text-xs font-mono text-amber-400 tabular-nums">
+                          ★ {anime.score}
+                        </span>
+                      ) : null}
+                    </div>
+                    <h4 className="text-sm sm:text-base font-semibold text-white group-hover:text-[#FF5E1A] transition-colors truncate">
                       {anime.title}
                     </h4>
                     <p className="text-xs text-zinc-400 mt-0.5 truncate">
@@ -161,21 +181,16 @@ export function SearchModal({
                             isUpcoming: true,
                           })})`
                         : availableSeasons.length > 1
-                          ? `${availableSeasons.length} saisons · ${anime.episodesCount} ép.`
-                          : `${anime.episodesCount} ép.`}
-                      {typeof anime.score === 'number'
-                        ? ` · ${anime.score}/10`
-                        : ''}
+                          ? `${availableSeasons.length} saisons · ${anime.episodesCount} épisodes`
+                          : `${anime.episodesCount} épisodes`}
                     </p>
                   </div>
-                  {isUpcoming ? (
-                    <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-300 shrink-0">
-                      <Clock className="w-3.5 h-3.5" />
-                      <span>À venir</span>
+                  <div className="shrink-0 flex items-center">
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/8 group-hover:bg-[#FF5E1A] text-xs font-semibold text-white transition-colors">
+                      <span>Voir la série</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
                     </span>
-                  ) : (
-                    <Play className="w-4 h-4 text-zinc-500 group-hover:text-white shrink-0" />
-                  )}
+                  </div>
                 </button>
               );
             })

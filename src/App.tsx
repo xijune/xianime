@@ -3,6 +3,7 @@ import {
   Bookmark,
   CalendarClock,
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Clock,
@@ -29,15 +30,21 @@ import {
 } from './data/animeCatalog';
 import {
   fetchAllSeasonsForAnime,
+  fetchCatalogPage,
   fetchHomeCatalog,
   fetchWeeklySchedule,
   searchRealAnime,
 } from './services/anilistApi';
 import { useWatchProgress } from './hooks/useWatchProgress';
+import { useProfiles } from './hooks/useProfiles';
 import { ArtworkImage } from './components/ArtworkImage';
 import { VideoPlayerModal } from './components/VideoPlayerModal';
 import { AnimeDetailModal } from './components/AnimeDetailModal';
 import { SearchModal } from './components/SearchModal';
+import { ProfileAvatar } from './components/ProfileAvatar';
+import { ProfileSelectModal } from './components/ProfileSelectModal';
+import { ProfileEditModal } from './components/ProfileEditModal';
+import type { UserProfile } from './types/profile';
 
 type NavSection = 'accueil' | 'catalogue' | 'simulcast' | 'maliste';
 
@@ -65,24 +72,56 @@ const DAYS: SimulcastDay[] = [
 
 export default function App() {
   const {
+    currentUser,
+    profiles,
+    activeProfile,
+    activeProfileId,
+    hasSelectedSessionProfile,
+    selectProfile,
+    createProfile,
+    updateProfile,
+    deleteProfile,
+  } = useProfiles();
+
+  const {
     progressByEpisode,
     continueWatchingList,
     watchlistSeries,
     watchlistIds,
     preferences,
     saveEpisodeProgress,
-    removeEpisodeProgress,
+    removeAnimeProgress,
     markEpisodeCompleted,
     toggleWatchlist,
     updatePreferences,
     getLatestProgressForAnime,
-  } = useWatchProgress();
+  } = useWatchProgress(
+    activeProfileId,
+    activeProfile.defaultAudio
+  );
+
+  const [profileSelectOpen, setProfileSelectOpen] = useState(false);
+  const [profileEditModalOpen, setProfileEditModalOpen] = useState(false);
+  const [profileToEdit, setProfileToEdit] = useState<UserProfile | null>(null);
 
   const [activeNav, setActiveNav] = useState<NavSection>('accueil');
   const [heroIndex, setHeroIndex] = useState(0);
   const [selectedGenre, setSelectedGenre] = useState<string>('Tout');
   const [selectedAudio, setSelectedAudio] = useState<'Tous' | AudioTrack>('Tous');
   const [catalogSort, setCatalogSort] = useState<'POPULARITY_DESC' | 'SCORE_DESC' | 'START_DATE_DESC'>('POPULARITY_DESC');
+  const [catalogPage, setCatalogPage] = useState<number>(1);
+  const [catalogSearchQuery, setCatalogSearchQuery] = useState<string>('');
+  const [catalogPageInfo, setCatalogPageInfo] = useState<{
+    total: number;
+    currentPage: number;
+    lastPage: number;
+    hasNextPage: boolean;
+  }>({
+    total: 0,
+    currentPage: 1,
+    lastPage: 1,
+    hasNextPage: false,
+  });
   const [selectedSimulcastDay, setSelectedSimulcastDay] = useState<SimulcastDay>(() => {
     const jsDays: SimulcastDay[] = [
       'Dimanche',
@@ -128,7 +167,7 @@ export default function App() {
         setLoadingHome(false);
       })
       .catch(() => {
-        setApiNotice('Impossible de charger les données AniList pour le moment.');
+        setApiNotice('Impossible de charger le catalogue pour le moment.');
         setLoadingHome(false);
       });
   }, []);
@@ -152,7 +191,7 @@ export default function App() {
       })
       .catch(() => {
         if (cancelled) return;
-        setApiNotice('Impossible de charger les données AniList pour le moment.');
+        setApiNotice('Impossible de charger le catalogue pour le moment.');
         setLoadingHome(false);
       });
 
@@ -161,34 +200,43 @@ export default function App() {
     };
   }, []);
 
-  // Fetch filtered real anime when genre or sort changes
+  // Reset page when genre, sort or search filter changes
+  useEffect(() => {
+    setCatalogPage(1);
+  }, [selectedGenre, catalogSort, catalogSearchQuery]);
+
+  // Fetch full catalog with real pagination from AniList
   useEffect(() => {
     let cancelled = false;
-    if (selectedGenre === 'Tout' && catalogSort === 'POPULARITY_DESC' && trendingSeries.length > 6) {
-      return;
-    }
-
     setLoadingCatalog(true);
-    void searchRealAnime({
-      genreFr: selectedGenre,
-      sort: catalogSort,
-      perPage: 18,
-    })
-      .then((items) => {
-        if (cancelled) return;
-        if (items.length > 0) {
-          setCatalogSeries(items);
-        }
-        setLoadingCatalog(false);
-      })
-      .catch(() => {
-        if (!cancelled) setLoadingCatalog(false);
-      });
+
+    const timer = window.setTimeout(
+      () => {
+        void fetchCatalogPage({
+          page: catalogPage,
+          perPage: 24,
+          query: catalogSearchQuery.trim() || undefined,
+          genreFr: selectedGenre,
+          sort: catalogSort,
+        })
+          .then((res) => {
+            if (cancelled) return;
+            setCatalogSeries(res.items);
+            setCatalogPageInfo(res.pageInfo);
+            setLoadingCatalog(false);
+          })
+          .catch(() => {
+            if (!cancelled) setLoadingCatalog(false);
+          });
+      },
+      catalogSearchQuery.trim() ? 350 : 0
+    );
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [selectedGenre, catalogSort, trendingSeries.length]);
+  }, [catalogPage, selectedGenre, catalogSort, catalogSearchQuery]);
 
   const activeHero: AnimeSeries | undefined =
     featuredSeries.length > 0
@@ -213,7 +261,12 @@ export default function App() {
       episode?: Episode,
       startAt = 0
     ) => {
-      if (!episode || episode.isUpcoming) return;
+      const isUpcomingEp =
+        !episode ||
+        episode.isUpcoming ||
+        (Boolean(episode.airingAt) && episode.airingAt! * 1000 > Date.now()) ||
+        anime.status === 'À venir';
+      if (isUpcomingEp) return;
       setDetailAnime(null);
 
       // If an older localStorage item wasn't hydrated with all franchise seasons yet, resolve Season 1 first
@@ -226,8 +279,17 @@ export default function App() {
               resolvedSeasons[0];
             const targetEp =
               targetSeason?.episodes.find(
-                (e) => e.number === episode.number && !e.isUpcoming
+                (e) =>
+                  e.number === episode.number &&
+                  !e.isUpcoming &&
+                  (!e.airingAt || e.airingAt * 1000 <= Date.now())
               ) ?? episode;
+            if (
+              targetEp.isUpcoming ||
+              (targetEp.airingAt && targetEp.airingAt * 1000 > Date.now())
+            ) {
+              return;
+            }
             setPlayerState({ anime: resolved, episode: targetEp, startAt });
           })
           .catch(() => {
@@ -245,14 +307,37 @@ export default function App() {
     (
       anime: AnimeSeries
     ): { episode: Episode | undefined; startAt: number; isResuming: boolean } => {
-      const latest = getLatestProgressForAnime(anime.id);
+      const isAnimeUpcoming =
+        anime.status === 'À venir' ||
+        (anime.nextAiringEpisode === 1 &&
+          Boolean(anime.nextAiringAt && anime.nextAiringAt * 1000 > Date.now()));
+
+      if (isAnimeUpcoming) {
+        return {
+          episode: undefined,
+          startAt: 0,
+          isResuming: false,
+        };
+      }
+
       const allEps = getAllSeriesEpisodes(anime);
+      const playableEps = allEps.filter(
+        (e) =>
+          !e.isUpcoming &&
+          (!e.airingAt || e.airingAt * 1000 <= Date.now())
+      );
+
+      if (playableEps.length === 0) {
+        return {
+          episode: undefined,
+          startAt: 0,
+          isResuming: false,
+        };
+      }
+
+      const latest = getLatestProgressForAnime(anime.id);
       if (latest && !latest.completed && latest.currentTime > 3) {
-        const ep =
-          allEps.find((e) => e.id === latest.episodeId) ??
-          (latest.snapshot?.episode && !latest.snapshot.episode.isUpcoming
-            ? latest.snapshot.episode
-            : undefined);
+        const ep = playableEps.find((e) => e.id === latest.episodeId);
         if (ep) {
           return {
             episode: ep,
@@ -261,8 +346,9 @@ export default function App() {
           };
         }
       }
+
       return {
-        episode: allEps[0],
+        episode: playableEps[0],
         startAt: 0,
         isResuming: false,
       };
@@ -332,16 +418,39 @@ export default function App() {
             })}
           </nav>
 
-          {/* Zone 3: 1 Primary Action */}
-          <div className="flex items-center shrink-0">
+          {/* Zone 3: Actions (Recherche + Profils) */}
+          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Rechercher un animé"
-              className="inline-flex items-center justify-center gap-2 px-3 sm:px-4 min-h-[44px] min-w-[44px] rounded-lg bg-[#181B24] hover:bg-[#222633] border border-white/10 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center justify-center gap-2 px-3 sm:px-3.5 min-h-[44px] min-w-[44px] rounded-lg bg-[#181B24] hover:bg-[#222633] border border-white/10 text-xs sm:text-sm font-medium text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Search className="w-4 h-4 text-zinc-300" />
+              <Search className="w-4 h-4 text-[#FF5E1A]" />
               <span className="hidden sm:inline">Rechercher</span>
+              <kbd className="hidden lg:inline-block text-[10px] font-mono text-zinc-400 bg-white/6 px-1.5 py-0.5 rounded border border-white/10 ml-0.5">
+                ⌘K
+              </kbd>
+            </button>
+
+            {/* Profile Switcher Trigger (Seul endroit où voir et changer le profil) */}
+            <button
+              type="button"
+              onClick={() => setProfileSelectOpen(true)}
+              aria-label={`Profil actif : ${activeProfile.name}. Cliquer pour changer de profil.`}
+              title={`Profil actif : ${activeProfile.name}`}
+              className="inline-flex items-center gap-2 sm:gap-2.5 px-2.5 sm:px-3 py-1.5 min-h-[44px] rounded-xl bg-[#181B24] hover:bg-[#222633] border border-white/10 hover:border-white/20 text-xs sm:text-sm font-medium text-white transition-all shrink-0 cursor-pointer group"
+            >
+              <ProfileAvatar avatar={activeProfile.avatar} color={activeProfile.color} size="sm" />
+              <div className="flex flex-col text-left leading-tight">
+                <span className="text-xs sm:text-sm font-semibold text-white group-hover:text-[#FF5E1A] transition-colors truncate max-w-[85px] sm:max-w-[120px]">
+                  {activeProfile.name}
+                </span>
+                <span className="text-[10px] text-zinc-400 group-hover:text-zinc-300 transition-colors">
+                  Changer
+                </span>
+              </div>
+              <ChevronDown className="w-3.5 h-3.5 text-zinc-400 group-hover:text-white transition-colors shrink-0 ml-0.5" />
             </button>
           </div>
         </div>
@@ -565,13 +674,16 @@ export default function App() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
                   {continueWatchingList.map((entry) => {
-                    const anime =
-                      entry.snapshot?.anime ??
+                    const liveAnime =
                       trendingSeries.find((a) => a.id === entry.animeId) ??
                       catalogSeries.find((a) => a.id === entry.animeId);
+                    const anime = liveAnime ?? entry.snapshot?.anime;
                     const episode =
-                      entry.snapshot?.episode ??
-                      anime?.episodes.find((e) => e.id === entry.episodeId);
+                      (anime
+                        ? getAllSeriesEpisodes(anime).find(
+                            (e) => e.id === entry.episodeId
+                          )
+                        : undefined) ?? entry.snapshot?.episode;
                     if (!anime || !episode) return null;
 
                     const pct =
@@ -581,7 +693,7 @@ export default function App() {
 
                     return (
                       <article
-                        key={entry.episodeId}
+                        key={entry.animeId}
                         className="group rounded-xl bg-[#13151B] border border-white/8 overflow-hidden flex flex-col"
                       >
                         <div className="relative aspect-video bg-black overflow-hidden">
@@ -609,9 +721,9 @@ export default function App() {
 
                           <button
                             type="button"
-                            onClick={() => removeEpisodeProgress(entry.episodeId)}
+                            onClick={() => removeAnimeProgress(entry.animeId)}
                             title="Retirer de la reprise"
-                            aria-label="Retirer cet épisode de la liste de reprise"
+                            aria-label="Retirer cet animé de la liste de reprise"
                             className="absolute top-2.5 right-2.5 min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-black/70 hover:bg-black text-zinc-200 hover:text-white opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity cursor-pointer"
                           >
                             <Trash2 className="w-4 h-4" />
@@ -938,7 +1050,7 @@ export default function App() {
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            {slotEpisode ? (
+                            {!isSlotUpcoming && slotEpisode ? (
                               <button
                                 type="button"
                                 onClick={() =>
@@ -957,9 +1069,7 @@ export default function App() {
                                   {action.isResuming &&
                                   slotEpisode.id === action.episode?.id
                                     ? `Reprendre (${formatTimecode(action.startAt)})`
-                                    : isSlotUpcoming
-                                      ? `Voir S${slotEpisode.season} E${slotEpisode.number}`
-                                      : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
+                                    : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
                                 </span>
                               </button>
                             ) : (
@@ -969,7 +1079,7 @@ export default function App() {
                                 className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] sm:min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap cursor-not-allowed flex-1 sm:flex-initial"
                               >
                                 <Clock className="w-3.5 h-3.5 text-amber-400" />
-                                <span>À venir</span>
+                                <span>À venir ({item.time})</span>
                               </button>
                             )}
                             <button
@@ -992,69 +1102,107 @@ export default function App() {
         {/* Full Catalogue Page */}
         {activeNav === 'catalogue' ? (
           <section className="max-w-[1400px] mx-auto px-4 sm:px-8 py-10">
-            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 pb-8 border-b border-white/8 mb-8">
-              <div>
-                <h1 className="text-3xl font-display font-bold text-white tracking-tight">
-                  Catalogue AniList complet
-                </h1>
-                <p className="text-sm text-zinc-400 mt-1.5">
-                  Parcourez les vrais animés par genre, classement ou nouveautés.
-                </p>
+            <div className="flex flex-col gap-6 pb-8 border-b border-white/8 mb-8">
+              <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+                <div>
+                  <h1 className="text-3xl font-display font-bold text-white tracking-tight">
+                    Catalogue d'animés
+                  </h1>
+                  <p className="text-sm text-zinc-400 mt-1.5">
+                    L'intégralité des animés du catalogue, avec navigation par page et toutes leurs saisons.
+                  </p>
+                </div>
+
+                {/* Direct anime search in catalogue */}
+                <div className="relative w-full md:w-80 shrink-0">
+                  <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                  <input
+                    type="search"
+                    enterKeyHint="search"
+                    value={catalogSearchQuery}
+                    onChange={(e) => setCatalogSearchQuery(e.target.value)}
+                    placeholder="Rechercher un animé (ex: One Piece)..."
+                    className="w-full pl-10 pr-9 py-2.5 bg-[#13151B] border border-white/10 rounded-xl text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-[#FF5E1A] transition-colors"
+                  />
+                  {catalogSearchQuery ? (
+                    <button
+                      type="button"
+                      onClick={() => setCatalogSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white text-xs px-1 cursor-pointer"
+                    >
+                      ✕
+                    </button>
+                  ) : null}
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg">
-                  {(['Tous', 'VOSTFR', 'VF'] as const).map((aud) => (
+              {/* Filters row: Audio, Sort & Page summary */}
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg">
+                    {(['Tous', 'VOSTFR', 'VF'] as const).map((aud) => (
+                      <button
+                        key={aud}
+                        type="button"
+                        onClick={() => setSelectedAudio(aud)}
+                        className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                          selectedAudio === aud
+                            ? 'bg-[#FF5E1A] text-white'
+                            : 'text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {aud}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg">
                     <button
-                      key={aud}
                       type="button"
-                      onClick={() => setSelectedAudio(aud)}
+                      onClick={() => setCatalogSort('POPULARITY_DESC')}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                        selectedAudio === aud
-                          ? 'bg-[#FF5E1A] text-white'
+                        catalogSort === 'POPULARITY_DESC'
+                          ? 'bg-white/14 text-white'
                           : 'text-zinc-400 hover:text-white'
                       }`}
                     >
-                      {aud}
+                      Populaires
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => setCatalogSort('SCORE_DESC')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        catalogSort === 'SCORE_DESC'
+                          ? 'bg-white/14 text-white'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Mieux notés
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCatalogSort('START_DATE_DESC')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                        catalogSort === 'START_DATE_DESC'
+                          ? 'bg-white/14 text-white'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Récents
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-1 p-1 bg-[#13151B] border border-white/8 rounded-lg">
-                  <button
-                    type="button"
-                    onClick={() => setCatalogSort('POPULARITY_DESC')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                      catalogSort === 'POPULARITY_DESC'
-                        ? 'bg-white/14 text-white'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    Populaires
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCatalogSort('SCORE_DESC')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                      catalogSort === 'SCORE_DESC'
-                        ? 'bg-white/14 text-white'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    Mieux notés
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setCatalogSort('START_DATE_DESC')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                      catalogSort === 'START_DATE_DESC'
-                        ? 'bg-white/14 text-white'
-                        : 'text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    Récents
-                  </button>
-                </div>
+                {catalogPageInfo.total > 0 ? (
+                  <div className="text-xs font-mono tabular-nums text-zinc-400 flex items-center gap-2">
+                    {loadingCatalog ? (
+                      <Loader2 className="w-3.5 h-3.5 text-[#FF5E1A] animate-spin" />
+                    ) : null}
+                    <span>
+                      Page {catalogPage} sur {catalogPageInfo.lastPage} · {catalogPageInfo.total.toLocaleString('fr-FR')} animés
+                    </span>
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1193,6 +1341,136 @@ export default function App() {
                 );
               })}
             </div>
+
+            {/* Empty state when no anime match filter or search */}
+            {!loadingCatalog && displayedCatalogue.length === 0 ? (
+              <div className="py-16 px-4 text-center rounded-2xl bg-[#13151B] border border-white/8 max-w-md mx-auto my-6">
+                <Search className="w-8 h-8 text-zinc-500 mx-auto mb-3" />
+                <h3 className="text-base font-semibold text-white mb-1">
+                  Aucun animé trouvé
+                </h3>
+                <p className="text-xs text-zinc-400 mb-5">
+                  {catalogSearchQuery
+                    ? `Aucun résultat pour « ${catalogSearchQuery} » dans cette catégorie.`
+                    : 'Aucun animé ne correspond aux filtres sélectionnés.'}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCatalogSearchQuery('');
+                    setSelectedGenre('Tout');
+                    setSelectedAudio('Tous');
+                    setCatalogSort('POPULARITY_DESC');
+                    setCatalogPage(1);
+                  }}
+                  className="px-4 py-2 rounded-lg bg-[#FF5E1A] hover:bg-[#e85112] text-xs font-semibold text-white transition-colors cursor-pointer"
+                >
+                  Réinitialiser les filtres
+                </button>
+              </div>
+            ) : null}
+
+            {/* Pagination Controls */}
+            {catalogPageInfo.lastPage > 1 ? (
+              <div className="mt-12 pt-8 border-t border-white/8 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="text-xs font-mono tabular-nums text-zinc-400 order-2 sm:order-1">
+                  Page {catalogPage} sur {catalogPageInfo.lastPage} ({catalogPageInfo.total.toLocaleString('fr-FR')} animés au catalogue)
+                </div>
+
+                <div className="flex items-center gap-2 order-1 sm:order-2">
+                  <button
+                    type="button"
+                    disabled={catalogPage <= 1 || loadingCatalog}
+                    onClick={() => {
+                      setCatalogPage((p) => Math.max(1, p - 1));
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 min-h-[40px] rounded-lg bg-[#13151B] border border-white/10 text-xs font-medium text-zinc-300 hover:text-white hover:border-white/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                  >
+                    <ChevronLeft className="w-4 h-4" />
+                    <span>Page précédente</span>
+                  </button>
+
+                  {/* Page indicator pills */}
+                  <div className="hidden sm:flex items-center gap-1">
+                    {catalogPage > 2 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCatalogPage(1);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="w-9 h-9 rounded-lg text-xs font-mono tabular-nums text-zinc-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+                      >
+                        1
+                      </button>
+                    ) : null}
+                    {catalogPage > 3 ? (
+                      <span className="text-zinc-600 px-1">…</span>
+                    ) : null}
+                    {catalogPage > 1 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCatalogPage(catalogPage - 1);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="w-9 h-9 rounded-lg text-xs font-mono tabular-nums text-zinc-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+                      >
+                        {catalogPage - 1}
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled
+                      className="w-9 h-9 rounded-lg text-xs font-mono tabular-nums font-semibold bg-[#FF5E1A] text-white"
+                    >
+                      {catalogPage}
+                    </button>
+                    {catalogPage < catalogPageInfo.lastPage ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCatalogPage(catalogPage + 1);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="w-9 h-9 rounded-lg text-xs font-mono tabular-nums text-zinc-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+                      >
+                        {catalogPage + 1}
+                      </button>
+                    ) : null}
+                    {catalogPage < catalogPageInfo.lastPage - 2 ? (
+                      <span className="text-zinc-600 px-1">…</span>
+                    ) : null}
+                    {catalogPage < catalogPageInfo.lastPage - 1 ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCatalogPage(catalogPageInfo.lastPage);
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
+                        }}
+                        className="w-9 h-9 rounded-lg text-xs font-mono tabular-nums text-zinc-400 hover:text-white hover:bg-white/5 transition-colors cursor-pointer"
+                      >
+                        {catalogPageInfo.lastPage}
+                      </button>
+                    ) : null}
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={!catalogPageInfo.hasNextPage || loadingCatalog}
+                    onClick={() => {
+                      setCatalogPage((p) => p + 1);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 min-h-[40px] rounded-lg bg-[#13151B] border border-white/10 text-xs font-medium text-zinc-300 hover:text-white hover:border-white/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer"
+                  >
+                    <span>Page suivante</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </section>
         ) : null}
 
@@ -1204,7 +1482,7 @@ export default function App() {
                 Programme Simulcast hebdomadaire
               </h1>
               <p className="text-sm text-zinc-400 mt-1.5">
-                Diffusions officielles de la semaine en cours (source AniList en direct).
+                Diffusions officielles de la semaine en cours.
               </p>
             </div>
 
@@ -1277,7 +1555,7 @@ export default function App() {
                                 </div>
                               </div>
 
-                              {slotEpisode ? (
+                              {!isSlotUpcoming && slotEpisode ? (
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -1294,9 +1572,7 @@ export default function App() {
                                   {action.isResuming &&
                                   slotEpisode.id === action.episode?.id
                                     ? 'Reprendre'
-                                    : isSlotUpcoming
-                                      ? `Voir S${slotEpisode.season} E${slotEpisode.number}`
-                                      : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
+                                    : `Regarder S${slotEpisode.season} E${slotEpisode.number}`}
                                 </button>
                               ) : (
                                 <button
@@ -1305,7 +1581,7 @@ export default function App() {
                                   className="inline-flex items-center gap-1 px-3 min-h-[38px] rounded-lg bg-white/4 border border-white/10 text-zinc-400 text-xs font-medium whitespace-nowrap shrink-0 cursor-not-allowed"
                                 >
                                   <Clock className="w-3 h-3 text-amber-400" />
-                                  <span>À venir</span>
+                                  <span>À venir ({item.time})</span>
                                 </button>
                               )}
                             </div>
@@ -1438,7 +1714,7 @@ export default function App() {
               KuroStream
             </span>
             <p className="text-xs text-zinc-500 mt-1">
-              Catalogue temps réel AniList & Jikan · Lecteur HD avec reprise à la seconde près
+              Plateforme d'animés en haute définition · Reprise de lecture à la seconde près
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-5 text-xs text-zinc-400">
@@ -1553,6 +1829,55 @@ export default function App() {
             })
           }
           onClose={() => setPlayerState(null)}
+        />
+      ) : null}
+
+      {/* Profile Selector Screen ("Qui regarde ?") displayed directly on arrival or when clicking profile */}
+      {!hasSelectedSessionProfile || profileSelectOpen ? (
+        <ProfileSelectModal
+          profiles={profiles}
+          activeProfileId={activeProfileId}
+          canClose={hasSelectedSessionProfile}
+          onSelectProfile={(id) => {
+            selectProfile(id);
+            setProfileSelectOpen(false);
+          }}
+          onCreateProfile={async (data) => {
+            return await createProfile(data);
+          }}
+          onUpdateProfile={async (id, patch) => {
+            await updateProfile(id, patch);
+          }}
+          onDeleteProfile={async (id) => {
+            await deleteProfile(id);
+          }}
+          onClose={() => setProfileSelectOpen(false)}
+        />
+      ) : null}
+
+      {/* Profile Edit / Create Modal */}
+      {profileEditModalOpen ? (
+        <ProfileEditModal
+          profileToEdit={profileToEdit}
+          canDelete={profiles.length > 1}
+          onSave={async (data) => {
+            if (profileToEdit) {
+              await updateProfile(profileToEdit.id, data);
+            } else {
+              await createProfile(data);
+            }
+            setProfileEditModalOpen(false);
+            setProfileToEdit(null);
+          }}
+          onDelete={async (id) => {
+            await deleteProfile(id);
+            setProfileEditModalOpen(false);
+            setProfileToEdit(null);
+          }}
+          onClose={() => {
+            setProfileEditModalOpen(false);
+            setProfileToEdit(null);
+          }}
         />
       ) : null}
     </div>

@@ -1,7 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Bookmark, Check, Clock, Loader2, Play, RotateCcw, X } from 'lucide-react';
+import {
+  Bookmark,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Loader2,
+  Play,
+  RotateCcw,
+  Search,
+  X,
+} from 'lucide-react';
 import {
   formatAiringDateFr,
+  formatEpisodeAirDateFr,
+  formatEpisodeBroadcastLabelFr,
   formatReleaseDateFr,
   formatRemainingMinutes,
   formatTimecode,
@@ -11,7 +24,7 @@ import {
   type Episode,
 } from '../data/animeCatalog';
 import {
-  enrichSeasonEpisodesFromJikan,
+  enrichSeasonEpisodes,
   fetchAllSeasonsForAnime,
 } from '../services/anilistApi';
 import type { EpisodeProgress } from '../hooks/useWatchProgress';
@@ -54,6 +67,9 @@ export function AnimeDetailModal({
   const [enrichedBySeason, setEnrichedBySeason] = useState<Record<number, Episode[]>>({});
   const [loadingSeasons, setLoadingSeasons] = useState(false);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [selectedBlockIdx, setSelectedBlockIdx] = useState<number>(0);
+  const [showAllEpisodes, setShowAllEpisodes] = useState<boolean>(false);
+  const [episodeFilterQuery, setEpisodeFilterQuery] = useState<string>('');
 
   // Load all connected seasons for this anime franchise
   useEffect(() => {
@@ -107,18 +123,33 @@ export function AnimeDetailModal({
     );
   }, [seasons, selectedSeasonNum]);
 
-  // Enrich episodes of the currently selected season via Jikan
+  // Enrich episodes of the currently selected season (AniList schedule + Kitsu + Jikan)
   useEffect(() => {
     if (!activeSeason) return;
     if (enrichedBySeason[activeSeason.seasonNumber]) return;
-    if (!activeSeason.malId) return;
+    if (activeSeason.episodes.length === 0) return;
+
+    const seasonAnilistId = activeSeason.anilistId ?? seriesData.anilistId;
+    if (!seasonAnilistId && !activeSeason.malId) return;
 
     let cancelled = false;
     setLoadingEpisodes(true);
-    void enrichSeasonEpisodesFromJikan(
-      activeSeason.episodes,
-      activeSeason.malId
-    )
+    void enrichSeasonEpisodes(activeSeason.episodes, {
+      anilistId: seasonAnilistId,
+      malId: activeSeason.malId,
+      animeTitle: seriesData.title,
+      seasonNumber: activeSeason.seasonNumber,
+      startDate: activeSeason.startDate ?? seriesData.startDate,
+      seasonYear: activeSeason.year ?? seriesData.year,
+      seasonName: activeSeason.seasonName ?? seriesData.seasonName,
+      nextAiringEpisode: activeSeason.nextAiringEpisode,
+      nextAiringAt: activeSeason.nextAiringAt,
+      fallbackThumb:
+        activeSeason.keyVisual ||
+        activeSeason.posterImage ||
+        seriesData.keyVisual ||
+        seriesData.posterImage,
+    })
       .then((enriched) => {
         if (!cancelled) {
           setEnrichedBySeason((prev) => ({
@@ -135,7 +166,17 @@ export function AnimeDetailModal({
     return () => {
       cancelled = true;
     };
-  }, [activeSeason, enrichedBySeason]);
+  }, [
+    activeSeason,
+    enrichedBySeason,
+    seriesData.anilistId,
+    seriesData.title,
+    seriesData.startDate,
+    seriesData.year,
+    seriesData.seasonName,
+    seriesData.keyVisual,
+    seriesData.posterImage,
+  ]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -169,19 +210,82 @@ export function AnimeDetailModal({
   );
 
   const primaryEpisode = useMemo(() => {
+    const isSeasonUpcoming =
+      activeSeason?.status === 'À venir' || seriesData.status === 'À venir';
+    if (isSeasonUpcoming) {
+      return { episode: undefined, startAt: 0 };
+    }
+
+    const isPlayable = (ep: Episode) =>
+      !ep.isUpcoming && (!ep.airingAt || ep.airingAt * 1000 <= Date.now());
+
     if (latestProgress && !latestProgress.completed && latestProgress.currentTime > 3) {
       const matchInActiveSeason = episodes.find(
-        (ep) => ep.id === latestProgress.episodeId && !ep.isUpcoming
+        (ep) => ep.id === latestProgress.episodeId && isPlayable(ep)
       );
       if (matchInActiveSeason) {
         return { episode: matchInActiveSeason, startAt: latestProgress.currentTime };
       }
     }
     const firstPlayable =
-      episodes.find((ep) => !ep.isUpcoming) ??
-      mergedSeasons.flatMap((s) => s.episodes).find((ep) => !ep.isUpcoming);
+      episodes.find(isPlayable) ??
+      mergedSeasons.flatMap((s) => s.episodes).find(isPlayable);
     return { episode: firstPlayable, startAt: 0 };
-  }, [episodes, latestProgress, mergedSeasons]);
+  }, [activeSeason?.status, seriesData.status, episodes, latestProgress, mergedSeasons]);
+
+  const EPISODES_PER_BLOCK = 50;
+
+  const episodeBlocks = useMemo(() => {
+    if (episodes.length <= EPISODES_PER_BLOCK) return [];
+    const blocks: Array<{ label: string; start: number; end: number; index: number }> = [];
+    const total = episodes.length;
+    for (let i = 0; i < total; i += EPISODES_PER_BLOCK) {
+      const start = i + 1;
+      const end = Math.min(i + EPISODES_PER_BLOCK, total);
+      blocks.push({
+        label: `Ép. ${start}–${end}`,
+        start,
+        end,
+        index: Math.floor(i / EPISODES_PER_BLOCK),
+      });
+    }
+    return blocks;
+  }, [episodes.length]);
+
+  useEffect(() => {
+    if (primaryEpisode.episode) {
+      const epNum = primaryEpisode.episode.number;
+      setSelectedBlockIdx(Math.floor((epNum - 1) / EPISODES_PER_BLOCK));
+    } else {
+      setSelectedBlockIdx(0);
+    }
+  }, [selectedSeasonNum, primaryEpisode.episode?.id]);
+
+  const displayedEpisodes = useMemo(() => {
+    const query = episodeFilterQuery.trim().toLowerCase();
+    if (query) {
+      const num = Number(query);
+      if (!Number.isNaN(num) && num > 0) {
+        const exact = episodes.filter((ep) => ep.number === num);
+        if (exact.length > 0) return exact;
+        return episodes.filter((ep) => String(ep.number).startsWith(query));
+      }
+      return episodes.filter(
+        (ep) =>
+          ep.title.toLowerCase().includes(query) ||
+          ep.synopsis.toLowerCase().includes(query) ||
+          String(ep.number).includes(query)
+      );
+    }
+
+    if (episodeBlocks.length === 0 || showAllEpisodes) {
+      return episodes;
+    }
+
+    const currentBlock = episodeBlocks[selectedBlockIdx] ?? episodeBlocks[0];
+    if (!currentBlock) return episodes;
+    return episodes.slice(currentBlock.start - 1, currentBlock.end);
+  }, [episodes, episodeFilterQuery, episodeBlocks, selectedBlockIdx, showAllEpisodes]);
 
   const isResumingPrimary = Boolean(
     primaryEpisode.episode && primaryEpisode.startAt > 3
@@ -335,7 +439,7 @@ export function AnimeDetailModal({
                 </span>
               </p>
               <p>
-                <span className="text-zinc-500">Note AniList :</span>{' '}
+                <span className="text-zinc-500">Note :</span>{' '}
                 <span className="text-zinc-200 tabular-nums">
                   {typeof seriesData.score === 'number'
                     ? `${seriesData.score} / 10`
@@ -428,6 +532,82 @@ export function AnimeDetailModal({
               </div>
             </div>
 
+            {/* Episode Navigation / Block Selector for Long Series (e.g., One Piece, Naruto, Bleach) */}
+            {episodes.length > EPISODES_PER_BLOCK || episodes.length > 25 ? (
+              <div className="mb-4 space-y-2.5 bg-white/[0.03] border border-white/8 rounded-xl p-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2 text-xs text-zinc-400">
+                    <span className="font-semibold text-zinc-200">
+                      {episodes.length} épisodes au total
+                    </span>
+                    {episodeBlocks.length > 1 && !showAllEpisodes && !episodeFilterQuery ? (
+                      <span className="text-zinc-500">
+                        · Affichage {episodeBlocks[selectedBlockIdx]?.label ?? ''}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {/* Quick episode jump/search */}
+                  <div className="relative w-full sm:w-64">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={episodeFilterQuery}
+                      onChange={(e) => setEpisodeFilterQuery(e.target.value)}
+                      placeholder="Aller à l'épisode (ex: 1080)..."
+                      className="w-full pl-8 pr-7 py-1.5 bg-black/40 border border-white/10 rounded-lg text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#FF5E1A] transition-colors"
+                    />
+                    {episodeFilterQuery ? (
+                      <button
+                        type="button"
+                        onClick={() => setEpisodeFilterQuery('')}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white text-xs px-1"
+                      >
+                        ✕
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Blocks Tabs */}
+                {episodeBlocks.length > 1 && !episodeFilterQuery ? (
+                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+                    {episodeBlocks.map((blk) => {
+                      const isSelected = !showAllEpisodes && selectedBlockIdx === blk.index;
+                      return (
+                        <button
+                          key={blk.label}
+                          type="button"
+                          onClick={() => {
+                            setShowAllEpisodes(false);
+                            setSelectedBlockIdx(blk.index);
+                          }}
+                          className={`px-2.5 py-1 rounded-md text-xs font-mono tabular-nums font-medium shrink-0 transition-colors cursor-pointer ${
+                            isSelected
+                              ? 'bg-[#FF5E1A] text-white shadow-sm'
+                              : 'bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          {blk.label}
+                        </button>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={() => setShowAllEpisodes(true)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium shrink-0 transition-colors cursor-pointer ${
+                        showAllEpisodes
+                          ? 'bg-[#FF5E1A] text-white shadow-sm'
+                          : 'bg-white/5 text-zinc-300 hover:bg-white/10 hover:text-white'
+                      }`}
+                    >
+                      Tout afficher ({episodes.length})
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="divide-y divide-white/8">
               {episodes.length === 0 ? (
                 <div className="py-10 px-4 text-center rounded-xl bg-white/3 border border-white/8">
@@ -441,7 +621,7 @@ export function AnimeDetailModal({
                   </div>
                   <p className="text-xs sm:text-sm text-zinc-400">
                     {activeSeason?.status === 'En cours'
-                      ? 'Cette série est marquée en cours sur AniList, mais aucun épisode diffusé n’est encore répertorié.'
+                      ? 'Cette série est actuellement en cours de diffusion, les prochains épisodes seront ajoutés dès leur sortie.'
                       : `Aucun épisode n’est encore diffusé pour cet animé. ${formatUpcomingNoticeFr({
                           nextAiringAt:
                             activeSeason?.nextAiringAt ?? seriesData.nextAiringAt,
@@ -454,7 +634,26 @@ export function AnimeDetailModal({
                   </p>
                 </div>
               ) : null}
-              {episodes.map((ep) => {
+
+              {episodes.length > 0 && displayedEpisodes.length === 0 ? (
+                <div className="py-8 px-4 text-center rounded-xl bg-white/3 border border-white/8">
+                  <p className="text-sm font-medium text-zinc-300 mb-1">
+                    Aucun épisode ne correspond à « {episodeFilterQuery} »
+                  </p>
+                  <p className="text-xs text-zinc-500 mb-3">
+                    Vérifiez le numéro d'épisode recherché parmi les {episodes.length} épisodes disponibles.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setEpisodeFilterQuery('')}
+                    className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-xs text-white transition-colors cursor-pointer"
+                  >
+                    Effacer la recherche d'épisode
+                  </button>
+                </div>
+              ) : null}
+
+              {displayedEpisodes.map((ep) => {
                 const prog = progressByEpisode[ep.id];
                 const hasSavedPos = Boolean(
                   prog && !prog.completed && prog.currentTime > 3
@@ -463,47 +662,103 @@ export function AnimeDetailModal({
                   prog && ep.duration > 0
                     ? Math.min(100, (prog.currentTime / ep.duration) * 100)
                     : 0;
+                const broadcast = formatEpisodeBroadcastLabelFr(ep.airingAt, ep.airedDate);
+                const isSharedFallback =
+                  !ep.thumbnail ||
+                  ep.thumbnail === activeSeason?.keyVisual ||
+                  ep.thumbnail === seriesData.keyVisual ||
+                  ep.thumbnail === seriesData.posterImage;
+
+                const FOCAL_POSITIONS = [
+                  'object-center',
+                  'object-top',
+                  'object-[center_35%]',
+                  'object-[center_65%]',
+                  'object-bottom',
+                ];
+                const focalClass = isSharedFallback
+                  ? FOCAL_POSITIONS[(ep.number - 1) % FOCAL_POSITIONS.length]
+                  : 'object-cover';
+
+                const isEpPlayable =
+                  !ep.isUpcoming &&
+                  (!ep.airingAt || ep.airingAt * 1000 <= Date.now()) &&
+                  activeSeason?.status !== 'À venir' &&
+                  seriesData.status !== 'À venir';
 
                 return (
                   <div
                     key={ep.id}
                     className="py-4 flex flex-col sm:flex-row sm:items-center gap-4 group"
                   >
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onPlayEpisode(
-                          enrichedAnime,
-                          ep,
-                          hasSavedPos ? prog!.currentTime : 0
-                        )
-                      }
-                      className="relative w-full sm:w-44 aspect-video rounded-lg overflow-hidden bg-black shrink-0 cursor-pointer"
-                    >
-                      <ArtworkImage
-                        src={ep.thumbnail || anime.keyVisual || anime.posterImage}
-                        alt={ep.title}
-                        title={ep.title}
-                        accentTint={anime.accentTint}
-                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                      />
-                      <div className="absolute inset-0 bg-black/35 group-hover:bg-black/20 flex items-center justify-center transition-colors">
-                        <div className="w-10 h-10 rounded-full bg-black/70 border border-white/25 flex items-center justify-center text-white">
-                          <Play className="w-4 h-4 fill-current ml-0.5" />
+                    {isEpPlayable ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onPlayEpisode(
+                            enrichedAnime,
+                            ep,
+                            hasSavedPos ? prog!.currentTime : 0
+                          )
+                        }
+                        className="relative w-full sm:w-44 aspect-video rounded-lg overflow-hidden bg-black shrink-0 cursor-pointer"
+                      >
+                        <ArtworkImage
+                          src={
+                            ep.thumbnail ||
+                            activeSeason?.keyVisual ||
+                            seriesData.keyVisual ||
+                            seriesData.posterImage
+                          }
+                          alt={ep.title}
+                          title={ep.title}
+                          accentTint={seriesData.accentTint}
+                          className={`w-full h-full ${focalClass} group-hover:scale-105 transition-transform duration-200`}
+                        />
+                        <span className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md border border-white/15 text-[11px] font-mono font-semibold tabular-nums text-white pointer-events-none">
+                          EP {ep.number}
+                        </span>
+                        <div className="absolute inset-0 bg-black/35 group-hover:bg-black/20 flex items-center justify-center transition-colors">
+                          <div className="w-10 h-10 rounded-full bg-black/70 border border-white/25 flex items-center justify-center text-white">
+                            <Play className="w-4 h-4 fill-current ml-0.5" />
+                          </div>
+                        </div>
+                        {pct > 0 ? (
+                          <div className="absolute inset-x-0 bottom-0 h-1 bg-white/25">
+                            <div
+                              className="h-full bg-[#FF5E1A]"
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        ) : null}
+                      </button>
+                    ) : (
+                      <div className="relative w-full sm:w-44 aspect-video rounded-lg overflow-hidden bg-black shrink-0 select-none opacity-80">
+                        <ArtworkImage
+                          src={
+                            ep.thumbnail ||
+                            activeSeason?.keyVisual ||
+                            seriesData.keyVisual ||
+                            seriesData.posterImage
+                          }
+                          alt={ep.title}
+                          title={ep.title}
+                          accentTint={seriesData.accentTint}
+                          className={`w-full h-full ${focalClass}`}
+                        />
+                        <span className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-md border border-white/15 text-[11px] font-mono font-semibold tabular-nums text-white pointer-events-none">
+                          EP {ep.number}
+                        </span>
+                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                          <div className="w-10 h-10 rounded-full bg-black/75 border border-white/20 flex items-center justify-center text-amber-400">
+                            <Clock className="w-4 h-4" />
+                          </div>
                         </div>
                       </div>
-                      {pct > 0 ? (
-                        <div className="absolute inset-x-0 bottom-0 h-1 bg-white/25">
-                          <div
-                            className="h-full bg-[#FF5E1A]"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                      ) : null}
-                    </button>
+                    )}
 
                     <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400 mb-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-400 mb-1">
                         <span className="font-mono tabular-nums text-zinc-300">
                           Épisode {ep.number}
                         </span>
@@ -511,6 +766,20 @@ export function AnimeDetailModal({
                         <span className="font-mono tabular-nums">
                           {formatTimecode(ep.duration)}
                         </span>
+                        {broadcast ? (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span
+                              className={`tabular-nums ${
+                                broadcast.isUpcoming
+                                  ? 'text-amber-300 font-medium'
+                                  : 'text-zinc-400'
+                              }`}
+                            >
+                              {broadcast.label}
+                            </span>
+                          </>
+                        ) : null}
                         {hasSavedPos ? (
                           <>
                             <span aria-hidden="true">·</span>
@@ -540,36 +809,45 @@ export function AnimeDetailModal({
                     </div>
 
                     <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onPlayEpisode(
-                            enrichedAnime,
-                            ep,
-                            hasSavedPos ? prog!.currentTime : 0
-                          )
-                        }
-                        className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] active:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer flex-1 sm:flex-initial"
-                      >
-                        <Play className="w-3.5 h-3.5 fill-current" />
-                        <span>
-                          {hasSavedPos
-                            ? `Reprendre (${formatTimecode(prog!.currentTime)})`
-                            : 'Regarder'}
-                        </span>
-                      </button>
+                      {isEpPlayable ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onPlayEpisode(
+                                enrichedAnime,
+                                ep,
+                                hasSavedPos ? prog!.currentTime : 0
+                              )
+                            }
+                            className="inline-flex items-center justify-center gap-1.5 px-4 min-h-[44px] rounded-lg bg-white/8 hover:bg-[#FF5E1A] active:bg-[#FF5E1A] text-white text-xs font-medium transition-colors whitespace-nowrap cursor-pointer flex-1 sm:flex-initial"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>
+                              {hasSavedPos
+                                ? `Reprendre (${formatTimecode(prog!.currentTime)})`
+                                : 'Regarder'}
+                            </span>
+                          </button>
 
-                      {hasSavedPos ? (
-                        <button
-                          type="button"
-                          onClick={() => onPlayEpisode(enrichedAnime, ep, 0)}
-                          title="Recommencer depuis le début"
-                          aria-label="Recommencer l'épisode depuis le début"
-                          className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-white/6 hover:bg-white/14 text-zinc-300 transition-colors cursor-pointer"
-                        >
-                          <RotateCcw className="w-4 h-4" />
-                        </button>
-                      ) : null}
+                          {hasSavedPos ? (
+                            <button
+                              type="button"
+                              onClick={() => onPlayEpisode(enrichedAnime, ep, 0)}
+                              title="Recommencer depuis le début"
+                              aria-label="Recommencer l'épisode depuis le début"
+                              className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-lg bg-white/6 hover:bg-white/14 text-zinc-300 transition-colors cursor-pointer"
+                            >
+                              <RotateCcw className="w-4 h-4" />
+                            </button>
+                          ) : null}
+                        </>
+                      ) : (
+                        <span className="inline-flex items-center justify-center gap-1.5 px-3.5 min-h-[40px] rounded-lg bg-white/4 border border-white/10 text-amber-300 text-xs font-medium whitespace-nowrap select-none">
+                          <Clock className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Non disponible</span>
+                        </span>
+                      )}
                     </div>
                   </div>
                 );

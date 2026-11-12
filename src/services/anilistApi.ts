@@ -1,5 +1,7 @@
 import {
   buildEpisodesForAnime,
+  computeRealisticEpisodeDuration,
+  estimateEpisodeAirDate,
   GENRE_MAP_FR,
   GENRE_TO_ANILIST,
   type AnimeSeason,
@@ -42,6 +44,10 @@ interface AniListRelationNodeRaw {
     large?: string | null;
   } | null;
   bannerImage?: string | null;
+  streamingEpisodes?: Array<{
+    title?: string | null;
+    thumbnail?: string | null;
+  }> | null;
 }
 
 interface AniListMediaRaw {
@@ -56,6 +62,7 @@ interface AniListMediaRaw {
   description?: string | null;
   genres?: string[] | null;
   averageScore?: number | null;
+  popularity?: number | null;
   season?: AnimeSeasonName | null;
   seasonYear?: number | null;
   startDate?: AniListFuzzyDate | null;
@@ -196,6 +203,44 @@ function getMediaDisplayTitle(raw: {
   );
 }
 
+function isSameFranchiseTitle(
+  titleA?: string | null,
+  titleB?: string | null
+): boolean {
+  if (!titleA || !titleB) return false;
+  const normalize = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/gi, ' ')
+      .split(/\s+/)
+      .filter(
+        (w) =>
+          w.length >= 3 &&
+          ![
+            'the',
+            'and',
+            'for',
+            'with',
+            'season',
+            'saison',
+            'part',
+            'partie',
+            'hen',
+            'act',
+            'arc',
+            'first',
+            'second',
+            'third',
+          ].includes(w)
+      );
+  const wordsA = new Set(normalize(titleA));
+  const wordsB = new Set(normalize(titleB));
+  for (const w of wordsA) {
+    if (wordsB.has(w)) return true;
+  }
+  return false;
+}
+
 function getRelatedSeasonEdges(raw: AniListMediaRaw): Array<{
   relationType: 'PREQUEL' | 'SEQUEL';
   node: AniListRelationNodeRaw;
@@ -206,10 +251,43 @@ function getRelatedSeasonEdges(raw: AniListMediaRaw): Array<{
     node: AniListRelationNodeRaw;
   }> = [];
 
+  const rawTitles = [
+    raw.title?.romaji,
+    raw.title?.english,
+    raw.title?.native,
+  ].filter(Boolean) as string[];
+
   for (const edge of edges) {
     if (!edge?.node) continue;
     if (edge.relationType !== 'PREQUEL' && edge.relationType !== 'SEQUEL') continue;
     if (edge.node.type && edge.node.type !== 'ANIME') continue;
+
+    // Single-episode ONA/Special spin-offs (like MONSTERS vs One Piece) must not hijack the main series
+    if (
+      edge.node.format === 'ONA' ||
+      edge.node.format === 'SPECIAL' ||
+      edge.node.format === 'MOVIE'
+    ) {
+      if (edge.node.episodes === 1 && (!raw.episodes || raw.episodes > 1)) {
+        continue;
+      }
+    }
+
+    const nodeTitles = [
+      edge.node.title?.romaji,
+      edge.node.title?.english,
+      edge.node.title?.native,
+    ].filter(Boolean) as string[];
+
+    const sameFranchise = rawTitles.some((rt) =>
+      nodeTitles.some((nt) => isSameFranchiseTitle(rt, nt))
+    );
+
+    // If titles share no meaningful franchise keyword, they are distinct works (e.g. MONSTERS vs ONE PIECE)
+    if (!sameFranchise) {
+      continue;
+    }
+
     results.push({ relationType: edge.relationType, node: edge.node });
   }
   return results;
@@ -246,22 +324,37 @@ function getReleasedEpisodesCount(raw: AniListMediaRaw): number {
   if (raw.status === 'NOT_YET_RELEASED' || raw.status === 'CANCELLED') {
     return 0;
   }
+
+  // If Season 1 / Episode 1 has not aired yet, 0 episodes are released
+  if (
+    raw.nextAiringEpisode?.episode === 1 &&
+    raw.nextAiringEpisode.airingAt * 1000 > Date.now()
+  ) {
+    return 0;
+  }
+
+  const streamCount = raw.streamingEpisodes?.length ?? 0;
+  const declaredEpisodes = raw.episodes ?? 0;
+
   if (raw.status === 'RELEASING') {
     if (raw.nextAiringEpisode?.episode) {
       const airedAlready = raw.nextAiringEpisode.airingAt * 1000 <= Date.now();
-      return Math.max(
+      const currentAiringCount = Math.max(
         0,
         airedAlready
           ? raw.nextAiringEpisode.episode
           : raw.nextAiringEpisode.episode - 1
       );
+      // For ongoing series: only already aired episodes or streams, NEVER future declaredEpisodes!
+      return Math.max(currentAiringCount, streamCount);
     }
-    if (raw.streamingEpisodes && raw.streamingEpisodes.length > 0) {
-      return raw.streamingEpisodes.length;
+    if (streamCount > 0) {
+      return streamCount;
     }
-    return raw.episodes ?? 0;
+    return declaredEpisodes > 0 ? declaredEpisodes : 1;
   }
-  return raw.episodes || raw.streamingEpisodes?.length || 12;
+
+  return Math.max(declaredEpisodes, streamCount, 0);
 }
 
 function buildSeasonFromMedia(
@@ -291,7 +384,15 @@ function buildSeasonFromMedia(
     durMin,
     thumb,
     m.streamingEpisodes ?? undefined,
-    seasonNumber
+    seasonNumber,
+    {
+      startDate,
+      seasonYear: year,
+      seasonName: m.season ?? undefined,
+      nextAiringEpisode: m.nextAiringEpisode?.episode,
+      nextAiringAt: m.nextAiringEpisode?.airingAt,
+      status: seasonStatus,
+    }
   );
 
   return {
@@ -527,7 +628,15 @@ function groupFranchiseCatalog(
     );
     const members = tvMembers.length > 0 ? tvMembers : orderedAll;
 
-    const rootRaw = members[0];
+    // Pick seed match or the entry with the highest episode count/significance as the root
+    const seedMatch = seedIds ? members.find((m) => seedIds.has(m.id)) : undefined;
+    const sortedBySignificance = [...members].sort((a, b) => {
+      const epA = a.episodes || 0;
+      const epB = b.episodes || 0;
+      if (Math.abs(epA - epB) >= 10) return epB - epA;
+      return (b.popularity || 0) - (a.popularity || 0);
+    });
+    const rootRaw = seedMatch ?? sortedBySignificance[0] ?? members[0];
     const rootSeries = mapAniListMedia(
       rootRaw,
       groupedSeries.length < featuredCount
@@ -587,6 +696,7 @@ const MEDIA_FRAGMENT = `
   description(asHtml: false)
   genres
   averageScore
+  popularity
   season
   seasonYear
   startDate {
@@ -647,6 +757,10 @@ const MEDIA_FRAGMENT = `
           large
         }
         bannerImage
+        streamingEpisodes {
+          title
+          thumbnail
+        }
       }
     }
   }
@@ -828,7 +942,8 @@ export async function fetchAllSeasonsForAnime(anime: AnimeSeries): Promise<Anime
       franchiseCache.set(anime.anilistId, anime);
       return anime;
     }
-    const rootRaw = allMedia[0];
+    const seedMedia = allMedia.find((m) => m.id === anime.anilistId);
+    const rootRaw = seedMedia ?? allMedia[0];
     const baseSeries = mapAniListMedia(rootRaw, anime.featured);
     const rootId = baseSeries.id;
 
@@ -932,20 +1047,40 @@ export async function fetchHomeCatalog(): Promise<{
   return { featured, trending, popular };
 }
 
-export async function searchRealAnime(options: {
+export interface CatalogPageResult {
+  items: AnimeSeries[];
+  pageInfo: {
+    total: number;
+    currentPage: number;
+    lastPage: number;
+    hasNextPage: boolean;
+    perPage: number;
+  };
+}
+
+export async function fetchCatalogPage(options: {
   query?: string;
   genreFr?: string;
   sort?: 'POPULARITY_DESC' | 'SCORE_DESC' | 'TRENDING_DESC' | 'START_DATE_DESC';
   page?: number;
   perPage?: number;
-}): Promise<AnimeSeries[]> {
+}): Promise<CatalogPageResult> {
   const aniGenre = options.genreFr ? GENRE_TO_ANILIST[options.genreFr] || undefined : undefined;
   const searchStr = options.query?.trim() || undefined;
   const sort = options.sort || 'POPULARITY_DESC';
+  const page = options.page ?? 1;
+  const perPage = options.perPage ?? 24;
 
   const query = `
     query SearchAnime($search: String, $genre: String, $sort: [MediaSort], $page: Int, $perPage: Int) {
       Page(page: $page, perPage: $perPage) {
+        pageInfo {
+          total
+          currentPage
+          lastPage
+          hasNextPage
+          perPage
+        }
         media(type: ANIME, search: $search, genre: $genre, sort: $sort, isAdult: false) {
           ${MEDIA_FRAGMENT}
         }
@@ -954,18 +1089,54 @@ export async function searchRealAnime(options: {
   `;
 
   const data = await queryAniList<{
-    Page: { media: AniListMediaRaw[] };
+    Page: {
+      pageInfo?: {
+        total?: number;
+        currentPage?: number;
+        lastPage?: number;
+        hasNextPage?: boolean;
+        perPage?: number;
+      };
+      media: AniListMediaRaw[];
+    };
   }>(query, {
     search: searchStr,
     genre: aniGenre,
     sort: [sort],
-    page: options.page ?? 1,
-    perPage: options.perPage ?? 24,
+    page,
+    perPage,
   });
 
-  const seedIds = new Set(data.Page.media.map((m) => m.id));
-  const hydrated = await hydrateFranchiseMedia(data.Page.media);
-  return groupFranchiseCatalog(hydrated, 0, seedIds);
+  const rawMedia = data.Page.media ?? [];
+  const seedIds = new Set(rawMedia.map((m) => m.id));
+  const hydrated = await hydrateFranchiseMedia(rawMedia);
+  const items = groupFranchiseCatalog(hydrated, 0, seedIds);
+
+  const total = data.Page.pageInfo?.total ?? items.length;
+  const lastPage = data.Page.pageInfo?.lastPage ?? Math.max(1, Math.ceil(total / perPage));
+  const hasNextPage = Boolean(data.Page.pageInfo?.hasNextPage ?? page < lastPage);
+
+  return {
+    items,
+    pageInfo: {
+      total,
+      currentPage: page,
+      lastPage,
+      hasNextPage,
+      perPage,
+    },
+  };
+}
+
+export async function searchRealAnime(options: {
+  query?: string;
+  genreFr?: string;
+  sort?: 'POPULARITY_DESC' | 'SCORE_DESC' | 'TRENDING_DESC' | 'START_DATE_DESC';
+  page?: number;
+  perPage?: number;
+}): Promise<AnimeSeries[]> {
+  const result = await fetchCatalogPage(options);
+  return result.items;
 }
 
 export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
@@ -1048,6 +1219,8 @@ export async function fetchWeeklySchedule(): Promise<SimulcastScheduleItem[]> {
   return items;
 }
 
+const KITSU_ENDPOINT = 'https://kitsu.io/api/edge';
+
 interface JikanEpisodeRaw {
   mal_id: number;
   title?: string | null;
@@ -1057,43 +1230,431 @@ interface JikanEpisodeRaw {
   recap?: boolean;
 }
 
+interface JikanVideoEpisodeRaw {
+  mal_id: number;
+  title?: string | null;
+  images?: {
+    jpg?: {
+      image_url?: string | null;
+    } | null;
+  } | null;
+}
+
+interface KitsuEpisodeAttributes {
+  canonicalTitle?: string | null;
+  titles?: Record<string, string> | null;
+  synopsis?: string | null;
+  description?: string | null;
+  number?: number | null;
+  relativeNumber?: number | null;
+  airdate?: string | null;
+  length?: number | null;
+  thumbnail?: {
+    large?: string | null;
+    medium?: string | null;
+    original?: string | null;
+    small?: string | null;
+  } | null;
+}
+
+interface KitsuEpMeta {
+  title?: string;
+  synopsis?: string;
+  durationMin?: number;
+  thumbnail?: string;
+  airdate?: string;
+}
+
+const enrichedSeasonCache = new Map<string, Episode[]>();
+
+async function fetchAniListEpisodeSchedules(
+  anilistId?: number
+): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  if (!anilistId) return map;
+
+  try {
+    for (let page = 1; page <= 2; page++) {
+      const query = `
+        query EpisodeSchedules($id: Int, $page: Int) {
+          Media(id: $id, type: ANIME) {
+            airingSchedule(page: $page, perPage: 50) {
+              pageInfo {
+                hasNextPage
+              }
+              nodes {
+                episode
+                airingAt
+              }
+            }
+          }
+        }
+      `;
+      const data = await queryAniList<{
+        Media?: {
+          airingSchedule?: {
+            pageInfo?: { hasNextPage?: boolean };
+            nodes?: Array<{ episode?: number | null; airingAt?: number | null }>;
+          } | null;
+        } | null;
+      }>(query, { id: anilistId, page });
+
+      const nodes = data.Media?.airingSchedule?.nodes ?? [];
+      for (const n of nodes) {
+        if (typeof n.episode === 'number' && typeof n.airingAt === 'number') {
+          map.set(n.episode, n.airingAt);
+        }
+      }
+      if (!data.Media?.airingSchedule?.pageInfo?.hasNextPage) break;
+    }
+  } catch {
+    // Ignore schedule errors
+  }
+  return map;
+}
+
+async function resolveKitsuAnimeId(
+  anilistId?: number,
+  malId?: number,
+  animeTitle?: string,
+  seasonNumber?: number
+): Promise<string | null> {
+  const lookups: Array<{ site: string; id: number }> = [];
+  if (anilistId) lookups.push({ site: 'anilist/anime', id: anilistId });
+  if (malId) lookups.push({ site: 'myanimelist/anime', id: malId });
+
+  for (const lookup of lookups) {
+    try {
+      const url = `${KITSU_ENDPOINT}/mappings?filter[externalSite]=${encodeURIComponent(
+        lookup.site
+      )}&filter[externalId]=${lookup.id}&include=item`;
+      const res = await fetch(url, {
+        headers: { Accept: 'application/vnd.api+json' },
+      });
+      if (!res.ok) continue;
+      const json = (await res.json()) as {
+        data?: Array<{
+          relationships?: { item?: { data?: { id?: string; type?: string } } };
+        }>;
+        included?: Array<{ id?: string; type?: string }>;
+      };
+      const relId = json.data?.[0]?.relationships?.item?.data?.id;
+      const incId = json.included?.find((i) => i.type === 'anime')?.id;
+      if (relId || incId) return relId || incId || null;
+    } catch {
+      // Try next mapping
+    }
+  }
+
+  // Fallback: search Kitsu by title (especially vital for season 2+, sequels, or unmapped anime)
+  if (animeTitle) {
+    try {
+      const searchTerms: string[] = [];
+      if (seasonNumber && seasonNumber > 1) {
+        searchTerms.push(`${animeTitle} Season ${seasonNumber}`);
+        searchTerms.push(`${animeTitle} ${seasonNumber}`);
+      }
+      searchTerms.push(animeTitle);
+
+      for (const term of searchTerms) {
+        const url = `${KITSU_ENDPOINT}/anime?filter[text]=${encodeURIComponent(
+          term
+        )}&page[limit]=3`;
+        const res = await fetch(url, {
+          headers: { Accept: 'application/vnd.api+json' },
+        });
+        if (!res.ok) continue;
+        const json = (await res.json()) as {
+          data?: Array<{ id?: string }>;
+        };
+        if (json.data && json.data.length > 0 && json.data[0].id) {
+          return json.data[0].id;
+        }
+      }
+    } catch {
+      // Ignore search error
+    }
+  }
+
+  return null;
+}
+
+async function fetchKitsuEpisodesMeta(
+  anilistId?: number,
+  malId?: number,
+  animeTitle?: string,
+  seasonNumber?: number,
+  expectedCount = 24
+): Promise<Map<number, KitsuEpMeta>> {
+  const map = new Map<number, KitsuEpMeta>();
+  try {
+    const kitsuId = await resolveKitsuAnimeId(anilistId, malId, animeTitle, seasonNumber);
+    if (!kitsuId) return map;
+
+    const maxPages = Math.min(5, Math.max(1, Math.ceil(expectedCount / 20)));
+    const offsets = Array.from({ length: maxPages }, (_, idx) => idx * 20);
+
+    const pages = await Promise.all(
+      offsets.map(async (offset) => {
+        try {
+          const res = await fetch(
+            `${KITSU_ENDPOINT}/anime/${kitsuId}/episodes?page[limit]=20&page[offset]=${offset}&sort=number`,
+            { headers: { Accept: 'application/vnd.api+json' } }
+          );
+          if (!res.ok) return [];
+          const json = (await res.json()) as {
+            data?: Array<{ attributes?: KitsuEpisodeAttributes }>;
+          };
+          return json.data ?? [];
+        } catch {
+          return [];
+        }
+      })
+    );
+
+    for (const items of pages) {
+      for (const row of items) {
+        const attr = row.attributes;
+        if (!attr) continue;
+        const epNum = attr.relativeNumber ?? attr.number;
+        if (!epNum || epNum <= 0) continue;
+
+        const thumb =
+          attr.thumbnail?.original ||
+          attr.thumbnail?.large ||
+          attr.thumbnail?.medium ||
+          attr.thumbnail?.small ||
+          undefined;
+        const rawSynopsis = (attr.synopsis || attr.description || '')
+          .replace(/\s*\(Source:[^)]+\)\s*$/i, '')
+          .trim();
+        const title =
+          attr.canonicalTitle ||
+          attr.titles?.en ||
+          attr.titles?.en_us ||
+          attr.titles?.en_jp ||
+          undefined;
+
+        const meta: KitsuEpMeta = {
+          title: title?.trim() || undefined,
+          synopsis: rawSynopsis || undefined,
+          durationMin:
+            typeof attr.length === 'number' && attr.length > 0
+              ? attr.length
+              : undefined,
+          thumbnail: thumb,
+          airdate: attr.airdate || undefined,
+        };
+
+        if (!map.has(epNum)) map.set(epNum, meta);
+        if (attr.number && !map.has(attr.number)) map.set(attr.number, meta);
+      }
+    }
+  } catch {
+    // Ignore Kitsu failure
+  }
+  return map;
+}
+
+async function fetchJikanMeta(malId?: number): Promise<{
+  episodes: Map<number, JikanEpisodeRaw>;
+  thumbs: Map<number, string>;
+}> {
+  const episodes = new Map<number, JikanEpisodeRaw>();
+  const thumbs = new Map<number, string>();
+  if (!malId) return { episodes, thumbs };
+
+  try {
+    const [epsRes, vidsRes] = await Promise.allSettled([
+      fetch(`${JIKAN_ENDPOINT}/anime/${malId}/episodes?page=1`, {
+        signal: AbortSignal.timeout(1800),
+      }),
+      fetch(`${JIKAN_ENDPOINT}/anime/${malId}/videos/episodes?page=1`, {
+        signal: AbortSignal.timeout(1800),
+      }),
+    ]);
+
+    if (epsRes.status === 'fulfilled' && epsRes.value.ok) {
+      try {
+        const json = (await epsRes.value.json()) as { data?: JikanEpisodeRaw[] };
+        (json.data ?? []).forEach((jep, idx) => {
+          episodes.set(jep.mal_id || idx + 1, jep);
+        });
+      } catch {
+        // Ignore parse error
+      }
+    }
+
+    if (vidsRes.status === 'fulfilled' && vidsRes.value.ok) {
+      try {
+        const json = (await vidsRes.value.json()) as {
+          data?: JikanVideoEpisodeRaw[];
+        };
+        (json.data ?? []).forEach((v, idx) => {
+          const img = v.images?.jpg?.image_url;
+          if (img) {
+            thumbs.set(v.mal_id || idx + 1, img);
+          }
+        });
+      } catch {
+        // Ignore parse error
+      }
+    }
+  } catch {
+    // Ignore Jikan failure
+  }
+
+  return { episodes, thumbs };
+}
+
+export interface EnrichSeasonOptions {
+  anilistId?: number;
+  malId?: number;
+  fallbackThumb?: string;
+  animeTitle?: string;
+  seasonNumber?: number;
+  startDate?: ReleaseFuzzyDate;
+  seasonYear?: number;
+  seasonName?: AnimeSeasonName;
+  nextAiringEpisode?: number;
+  nextAiringAt?: number;
+}
+
+export async function enrichSeasonEpisodes(
+  episodes: Episode[],
+  options: EnrichSeasonOptions
+): Promise<Episode[]> {
+  if (episodes.length === 0) return episodes;
+  const cacheKey = `${options.anilistId ?? 0}-${options.malId ?? 0}-${episodes[0]?.season ?? 1}-${episodes.length}`;
+  const cached = enrichedSeasonCache.get(cacheKey);
+  if (cached) return cached;
+
+  const [scheduleMap, kitsuMap, jikanMeta] = await Promise.all([
+    fetchAniListEpisodeSchedules(options.anilistId),
+    fetchKitsuEpisodesMeta(
+      options.anilistId,
+      options.malId,
+      options.animeTitle,
+      options.seasonNumber ?? episodes[0]?.season,
+      episodes.length
+    ),
+    fetchJikanMeta(options.malId),
+  ]);
+
+  const thumbCounts = new Map<string, number>();
+  for (const ep of episodes) {
+    if (ep.thumbnail) {
+      thumbCounts.set(ep.thumbnail, (thumbCounts.get(ep.thumbnail) ?? 0) + 1);
+    }
+  }
+
+  const merged = episodes.map((ep) => {
+    const next = { ...ep };
+    const kitsu = kitsuMap.get(ep.number);
+    const jikanEp = jikanMeta.episodes.get(ep.number);
+    const jikanThumb = jikanMeta.thumbs.get(ep.number);
+    const airingAt = scheduleMap.get(ep.number);
+
+    if (airingAt) {
+      next.airingAt = airingAt;
+    }
+
+    const rawAiredDate = kitsu?.airdate || jikanEp?.aired;
+    if (rawAiredDate) {
+      next.airedDate = rawAiredDate;
+    }
+
+    // Ensure air date is never undefined by computing weekly broadcast if missing
+    if (!next.airedDate && !next.airingAt) {
+      const estimated = estimateEpisodeAirDate(
+        ep.number,
+        options.startDate,
+        options.seasonYear,
+        options.seasonName,
+        options.nextAiringEpisode,
+        options.nextAiringAt
+      );
+      if (estimated.airingAt) next.airingAt = estimated.airingAt;
+      if (estimated.airedDate) next.airedDate = estimated.airedDate;
+    }
+
+    // Authentic duration down to the second
+    if (kitsu?.durationMin && kitsu.durationMin > 0) {
+      next.duration = computeRealisticEpisodeDuration(
+        ep.animeId,
+        ep.season,
+        ep.number,
+        kitsu.durationMin,
+        kitsu.durationMin
+      );
+      next.endingStart = Math.max(120, next.duration - 90);
+    } else if (next.duration <= 0 || next.duration % 60 === 0) {
+      next.duration = computeRealisticEpisodeDuration(
+        ep.animeId,
+        ep.season,
+        ep.number,
+        Math.floor(next.duration / 60) || 24
+      );
+      next.endingStart = Math.max(120, next.duration - 90);
+    }
+
+    // Replace generic or duplicated series/season banner thumbnail with real per-episode image when available
+    const isSharedFallback =
+      Boolean(next.thumbnail) && (thumbCounts.get(next.thumbnail) ?? 0) > 1;
+    const isGenericThumb =
+      !next.thumbnail ||
+      isSharedFallback ||
+      (options.fallbackThumb && next.thumbnail === options.fallbackThumb);
+
+    if (isGenericThumb) {
+      if (kitsu?.thumbnail) {
+        next.thumbnail = kitsu.thumbnail;
+      } else if (jikanThumb) {
+        next.thumbnail = jikanThumb;
+      }
+    } else if (!next.thumbnail) {
+      next.thumbnail = kitsu?.thumbnail || jikanThumb || '';
+    }
+
+    const isGenericTitle = /^Épisode\s+\d+$/i.test(next.title.trim());
+    if (isGenericTitle) {
+      const betterTitle = kitsu?.title?.trim() || jikanEp?.title?.trim();
+      if (betterTitle) {
+        next.title = betterTitle;
+      }
+    }
+
+    if (kitsu?.synopsis) {
+      next.synopsis = kitsu.synopsis;
+    } else if (jikanEp?.aired) {
+      const dateLabel = new Date(jikanEp.aired).toLocaleDateString('fr-FR', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      });
+      next.synopsis = `Saison ${next.season} · Diffusé le ${dateLabel}${
+        jikanEp.filler ? ' · Épisode hors-série' : ''
+      }.`;
+    }
+
+    return next;
+  });
+
+  enrichedSeasonCache.set(cacheKey, merged);
+  return merged;
+}
+
 export async function enrichSeasonEpisodesFromJikan(
   episodes: Episode[],
   malId?: number
 ): Promise<Episode[]> {
-  if (!malId) return episodes;
-
-  try {
-    const res = await fetch(`${JIKAN_ENDPOINT}/anime/${malId}/episodes?page=1`);
-    if (!res.ok) return episodes;
-    const json = (await res.json()) as { data?: JikanEpisodeRaw[] };
-    const jikanEps = json.data;
-    if (!jikanEps || jikanEps.length === 0) return episodes;
-
-    const merged = episodes.map((ep) => ({ ...ep }));
-    jikanEps.forEach((jep, idx) => {
-      const epNum = jep.mal_id || idx + 1;
-      const existing = merged.find((e) => e.number === epNum);
-      const niceTitle = jep.title?.trim();
-      if (existing && niceTitle) {
-        existing.title = niceTitle;
-        if (jep.aired) {
-          const dateLabel = new Date(jep.aired).toLocaleDateString('fr-FR', {
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-          });
-          existing.synopsis = `Saison ${existing.season} · Diffusé le ${dateLabel}${jep.filler ? ' · Épisode hors-série' : ''}. Cliquez pour lancer ou reprendre l'épisode.`;
-        }
-      }
-    });
-
-    return merged;
-  } catch {
-    return episodes;
-  }
+  return enrichSeasonEpisodes(episodes, { malId });
 }
 
 export async function enrichAnimeEpisodesFromJikan(anime: AnimeSeries): Promise<Episode[]> {
-  return enrichSeasonEpisodesFromJikan(anime.episodes, anime.malId);
+  return enrichSeasonEpisodes(anime.episodes, {
+    anilistId: anime.anilistId,
+    malId: anime.malId,
+    fallbackThumb: anime.keyVisual || anime.posterImage,
+  });
 }

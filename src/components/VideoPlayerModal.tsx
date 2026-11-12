@@ -20,6 +20,8 @@ import {
 import Hls from 'hls.js';
 import {
   formatAiringDateFr,
+  formatEpisodeAirDateFr,
+  formatEpisodeBroadcastLabelFr,
   formatTimecode,
   getAllSeriesEpisodes,
   getSeriesSeasons,
@@ -28,6 +30,7 @@ import {
   type Episode,
   type VideoQuality,
 } from '../data/animeCatalog';
+import { enrichSeasonEpisodes } from '../services/anilistApi';
 import type { EpisodeProgress, PlayerPreferences } from '../hooks/useWatchProgress';
 import { resolveEpisodeVideoUrl } from '../services/videoSourceResolver';
 
@@ -94,6 +97,13 @@ export function VideoPlayerModal({
 
   const seasons = useMemo(() => getSeriesSeasons(anime), [anime]);
   const [drawerSeasonNum, setDrawerSeasonNum] = useState<number>(episode.season || 1);
+  const [enrichedDrawerBySeason, setEnrichedDrawerBySeason] = useState<
+    Record<number, Episode[]>
+  >({});
+
+  useEffect(() => {
+    setEnrichedDrawerBySeason({});
+  }, [anime.id]);
 
   useEffect(() => {
     setDrawerSeasonNum(episode.season || 1);
@@ -104,10 +114,63 @@ export function VideoPlayerModal({
     [drawerSeasonNum, seasons]
   );
 
+  useEffect(() => {
+    if (!showEpisodesDrawer || !activeDrawerSeason) return;
+    if (enrichedDrawerBySeason[activeDrawerSeason.seasonNumber]) return;
+    if (activeDrawerSeason.episodes.length === 0) return;
+
+    const seasonAnilistId = activeDrawerSeason.anilistId ?? anime.anilistId;
+    if (!seasonAnilistId && !activeDrawerSeason.malId) return;
+
+    let cancelled = false;
+    void enrichSeasonEpisodes(activeDrawerSeason.episodes, {
+      anilistId: seasonAnilistId,
+      malId: activeDrawerSeason.malId,
+      animeTitle: anime.title,
+      seasonNumber: activeDrawerSeason.seasonNumber,
+      startDate: activeDrawerSeason.startDate ?? anime.startDate,
+      seasonYear: activeDrawerSeason.year ?? anime.year,
+      seasonName: activeDrawerSeason.seasonName ?? anime.seasonName,
+      nextAiringEpisode: activeDrawerSeason.nextAiringEpisode,
+      nextAiringAt: activeDrawerSeason.nextAiringAt,
+      fallbackThumb:
+        activeDrawerSeason.keyVisual ||
+        activeDrawerSeason.posterImage ||
+        anime.keyVisual ||
+        anime.posterImage,
+    }).then((enriched) => {
+      if (!cancelled) {
+        setEnrichedDrawerBySeason((prev) => ({
+          ...prev,
+          [activeDrawerSeason.seasonNumber]: enriched,
+        }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeDrawerSeason,
+    anime.anilistId,
+    anime.keyVisual,
+    anime.posterImage,
+    enrichedDrawerBySeason,
+    showEpisodesDrawer,
+  ]);
+
   const drawerEpisodes = useMemo(() => {
-    const raw = activeDrawerSeason?.episodes ?? anime.episodes;
+    const raw =
+      enrichedDrawerBySeason[drawerSeasonNum] ??
+      activeDrawerSeason?.episodes ??
+      anime.episodes;
     return raw.filter((e) => !e.isUpcoming);
-  }, [activeDrawerSeason?.episodes, anime.episodes]);
+  }, [
+    activeDrawerSeason?.episodes,
+    anime.episodes,
+    drawerSeasonNum,
+    enrichedDrawerBySeason,
+  ]);
 
   const nextEpisode = useMemo(() => {
     const allEps = getAllSeriesEpisodes(anime);
@@ -160,7 +223,7 @@ export function VideoPlayerModal({
         } else {
           setVideoSrc('');
           setVideoError(
-            "Aucune URL vidéo configurée pour cet épisode. Renseignez episode.videoUrl ou configurez VITE_VIDEO_API_URL."
+            "Flux vidéo temporairement indisponible pour cet épisode. Vous pouvez charger un fichier local ou réessayer plus tard."
           );
           setIsPlaying(false);
           isPlayingRef.current = false;
@@ -1071,6 +1134,7 @@ export function VideoPlayerModal({
                   ? Math.min(100, (prog.currentTime / ep.duration) * 100)
                   : 0;
               const isCurrent = ep.id === episode.id;
+              const broadcast = formatEpisodeBroadcastLabelFr(ep.airingAt, ep.airedDate);
               return (
                 <button
                   key={ep.id}
@@ -1098,9 +1162,20 @@ export function VideoPlayerModal({
                           : formatTimecode(ep.duration)}
                     </span>
                   </div>
-                  <p className="text-sm font-medium text-white mb-1">
+                  <p className="text-sm font-medium text-white mb-0.5">
                     {ep.title}
                   </p>
+                  {broadcast ? (
+                    <p
+                      className={`text-[11px] tabular-nums mb-1 ${
+                        broadcast.isUpcoming
+                          ? 'text-amber-300 font-medium'
+                          : 'text-zinc-400'
+                      }`}
+                    >
+                      {broadcast.label}
+                    </p>
+                  ) : null}
                   <p className="text-xs text-zinc-400 line-clamp-2">
                     {ep.synopsis}
                   </p>
