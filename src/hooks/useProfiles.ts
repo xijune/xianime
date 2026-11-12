@@ -248,10 +248,16 @@ export function useProfiles() {
   const updateProfile = useCallback(
     async (profileId: string, patch: Partial<UserProfile>) => {
       const now = Date.now();
+      let updatedProfile: UserProfile | undefined;
+
       setProfiles((prev) => {
-        const next = prev.map((p) =>
-          p.id === profileId ? { ...p, ...patch, updatedAt: now } : p
-        );
+        const next = prev.map((p) => {
+          if (p.id === profileId) {
+            updatedProfile = { ...p, ...patch, updatedAt: now };
+            return updatedProfile;
+          }
+          return p;
+        });
         try {
           localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(next));
         } catch {
@@ -260,31 +266,39 @@ export function useProfiles() {
         return next;
       });
 
-      if (currentUser) {
-        const docPath = `profiles/${profileId}`;
-        try {
-          const target = profiles.find((p) => p.id === profileId);
-          if (target) {
-            const merged = { ...target, ...patch, updatedAt: now };
-            await setDoc(
-              doc(db, docPath),
-              {
-                name: merged.name,
-                avatar: merged.avatar,
-                color: merged.color,
-                defaultAudio: merged.defaultAudio,
-                isKid: Boolean(merged.isKid),
-                updatedAt: new Date(now).toISOString(),
-              },
-              { merge: true }
-            );
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.UPDATE, docPath);
-        }
+      // Target document in Firestore
+      const docPath = `profiles/${profileId}`;
+      try {
+        const target =
+          updatedProfile ??
+          profiles.find((p) => p.id === profileId) ?? {
+            id: profileId,
+            name: patch.name || 'Profil',
+            avatar: patch.avatar || 'kuro',
+            color: patch.color || '#FF5E1A',
+            defaultAudio: patch.defaultAudio || 'VOSTFR',
+            isKid: Boolean(patch.isKid),
+            createdAt: now,
+            updatedAt: now,
+          };
+
+        await setDoc(
+          doc(db, docPath),
+          {
+            name: target.name,
+            avatar: target.avatar,
+            color: target.color,
+            defaultAudio: target.defaultAudio,
+            isKid: Boolean(target.isKid),
+            updatedAt: new Date(now).toISOString(),
+          },
+          { merge: true }
+        );
+      } catch (err) {
+        handleFirestoreError(err, OperationType.UPDATE, docPath);
       }
     },
-    [currentUser, profiles]
+    [profiles]
   );
 
   const deleteProfile = useCallback(

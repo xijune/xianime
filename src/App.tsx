@@ -97,7 +97,9 @@ export default function App() {
     getLatestProgressForAnime,
   } = useWatchProgress(
     activeProfileId,
-    activeProfile.defaultAudio
+    activeProfile.defaultAudio,
+    undefined,
+    currentUser
   );
 
   const [profileSelectOpen, setProfileSelectOpen] = useState(false);

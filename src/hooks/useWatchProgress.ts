@@ -15,6 +15,7 @@ import {
   deleteDoc,
   handleFirestoreError,
   OperationType,
+  type User,
 } from '../services/firebase';
 
 export interface EpisodeProgress {
@@ -111,7 +112,8 @@ function getInitialProfileState(profileId: string, defaultAudio?: 'VOSTFR' | 'VF
 export function useWatchProgress(
   activeProfileId = 'profile-main',
   defaultAudioOrUserId?: 'VOSTFR' | 'VF' | string,
-  defaultAudioArg?: 'VOSTFR' | 'VF'
+  defaultAudioArg?: 'VOSTFR' | 'VF',
+  currentUser?: User | null
 ) {
   const defaultAudio: 'VOSTFR' | 'VF' =
     defaultAudioArg ??
@@ -137,9 +139,9 @@ export function useWatchProgress(
     }
   }, [activeProfileId, state]);
 
-  // Real-time Firestore sync for Watchlist of active profile
+  // Real-time Firestore sync for Watchlist of active profile (only when authenticated)
   useEffect(() => {
-    if (!activeProfileId) return;
+    if (!currentUser || !activeProfileId) return;
 
     const path = `profiles/${activeProfileId}/watchlist`;
     const colRef = collection(db, path);
@@ -147,7 +149,6 @@ export function useWatchProgress(
     const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        if (snapshot.empty) return;
         const cloudWatchlist: AnimeSeries[] = [];
         snapshot.forEach((snap) => {
           const d = snap.data();
@@ -160,17 +161,10 @@ export function useWatchProgress(
           }
         });
 
-        if (cloudWatchlist.length > 0) {
-          setState((prev) => {
-            // Merge cloud with any existing local
-            const existingIds = new Set(cloudWatchlist.map((a) => a.id));
-            const retainedLocal = prev.watchlistSeries.filter((a) => !existingIds.has(a.id));
-            return {
-              ...prev,
-              watchlistSeries: [...cloudWatchlist, ...retainedLocal],
-            };
-          });
-        }
+        setState((prev) => ({
+          ...prev,
+          watchlistSeries: cloudWatchlist,
+        }));
       },
       (error) => {
         handleFirestoreError(error, OperationType.LIST, path);
@@ -178,11 +172,11 @@ export function useWatchProgress(
     );
 
     return () => unsubscribe();
-  }, [activeProfileId]);
+  }, [activeProfileId, currentUser]);
 
-  // Real-time Firestore sync for Progress of active profile
+  // Real-time Firestore sync for Progress of active profile (only when authenticated)
   useEffect(() => {
-    if (!activeProfileId) return;
+    if (!currentUser || !activeProfileId) return;
 
     const path = `profiles/${activeProfileId}/progress`;
     const colRef = collection(db, path);
@@ -190,7 +184,6 @@ export function useWatchProgress(
     const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        if (snapshot.empty) return;
         const cloudProgress: Record<string, EpisodeProgress> = {};
         snapshot.forEach((snap) => {
           const d = snap.data();
@@ -223,10 +216,7 @@ export function useWatchProgress(
 
         setState((prev) => ({
           ...prev,
-          progressByEpisode: {
-            ...prev.progressByEpisode,
-            ...cloudProgress,
-          },
+          progressByEpisode: cloudProgress,
         }));
       },
       (error) => {
@@ -235,7 +225,7 @@ export function useWatchProgress(
     );
 
     return () => unsubscribe();
-  }, [activeProfileId]);
+  }, [activeProfileId, currentUser]);
 
   const saveEpisodeProgress = useCallback(
     (
@@ -345,6 +335,7 @@ export function useWatchProgress(
     },
     [activeProfileId]
   );
+
 
   const markEpisodeCompleted = useCallback(
     (anime: AnimeSeries, episode: Episode, duration: number) => {
