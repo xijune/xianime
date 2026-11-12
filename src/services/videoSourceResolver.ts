@@ -1,6 +1,5 @@
 import type { AnimeSeries, Episode } from '../data/animeCatalog';
 
-// URL optionnelle d'une API vidéo configurée via .env (VITE_VIDEO_API_URL)
 const VIDEO_API_URL = (import.meta.env.VITE_VIDEO_API_URL as string | undefined)?.trim() || '';
 
 function isBlockedMixedContent(url: string): boolean {
@@ -8,49 +7,65 @@ function isBlockedMixedContent(url: string): boolean {
   return window.location.protocol === 'https:' && /^http:\/\//i.test(url);
 }
 
+/**
+ * Resolve a playable video/HLS URL for an episode via the external video API
+ * (xianime-video-api → VoirAnime / Anime-Sama / demo).
+ */
 export async function resolveEpisodeVideoUrl(
   anime: AnimeSeries,
   episode: Episode
 ): Promise<string | null> {
   if (episode.videoUrl) return episode.videoUrl;
 
-  if (!VIDEO_API_URL || isBlockedMixedContent(VIDEO_API_URL)) {
+  if (!VIDEO_API_URL) {
+    console.warn('[video] VITE_VIDEO_API_URL manquant');
+    return null;
+  }
+  if (isBlockedMixedContent(VIDEO_API_URL)) {
+    console.warn('[video] mixed content bloque', VIDEO_API_URL);
     return null;
   }
 
   try {
-    const activeSeason = anime.seasons?.find(
-      (s) => s.seasonNumber === episode.season
-    );
+    const payload = {
+      animeId: anime.id,
+      slug: anime.slug,
+      title: anime.title,
+      episodeNumber: episode.number,
+      season: episode.season ?? 1,
+      audio: 'VOSTFR' as const,
+    };
+    console.log('[video] resolve request', VIDEO_API_URL, payload);
+
     const response = await fetch(VIDEO_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        animeId: anime.id,
-        slug: anime.slug,
-        title: anime.title,
-        seasonSlug: activeSeason?.slug ?? anime.slug,
-        seasonTitle: activeSeason?.title ?? anime.title,
-        episodeNumber: episode.number,
-        season: episode.season,
-      }),
+      body: JSON.stringify(payload),
     });
 
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as {
+    const data = (await response.json().catch(() => ({}))) as {
       success?: boolean;
       videoUrl?: string;
       m3u8Url?: string;
+      error?: string;
+      provider?: string;
     };
 
-    if (data.videoUrl) return data.videoUrl;
-    if (data.success && data.m3u8Url) return data.m3u8Url;
+    console.log('[video] resolve response', response.status, data);
 
-    return null;
-  } catch {
+    if (!response.ok) {
+      console.warn('[video] API error', data.error || response.status);
+      return null;
+    }
+
+    const url = data.m3u8Url || data.videoUrl || null;
+    if (!url) {
+      console.warn('[video] pas d URL dans la reponse', data);
+      return null;
+    }
+    return url;
+  } catch (err) {
+    console.error('[video] fetch failed', err);
     return null;
   }
 }
